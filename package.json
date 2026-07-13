@@ -1,0 +1,40 @@
+{
+  "name": "@tejasghutukade/multi-agency",
+  "version": "0.1.0",
+  "description": "Orchestrator hub for multi-specialist pi sessions in cmux — hybrid file bus, agency_* tools, compound-engineering skills",
+  "keywords": ["pi-package", "pi", "cmux", "multi-agent", "orchestrator"],
+  "license": "MIT",
+  "author": "Tejas Ghutukade",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tejasghutukade/multi-agency.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tejasghutukade/multi-agency/issues"
+  },
+  "homepage": "https://github.com/tejasghutukade/multi-agency#readme",
+  "files": [
+    "extensions",
+    "skills",
+    "agency",
+    "agents",
+    "vendor",
+    "docs",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "NOTICE"
+  ],
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

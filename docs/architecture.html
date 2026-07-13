@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Agency Architecture v0</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet" />
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: "dark",
+      themeVariables: {
+        darkMode: true,
+        background: "#141A24",
+        primaryColor: "#1C2433",
+        primaryTextColor: "#E6EAF0",
+        primaryBorderColor: "#E8A838",
+        secondaryColor: "#1C2433",
+        tertiaryColor: "#0B0E14",
+        lineColor: "#5B9FED",
+        fontFamily: "IBM Plex Sans, sans-serif",
+      },
+    });
+  </script>
+  <style>
+    :root {
+      --void: #0B0E14;
+      --panel: #141A24;
+      --panel-2: #1C2433;
+      --chalk: #E6EAF0;
+      --mute: #8B95A8;
+      --signal: #E8A838;
+      --signal-dim: #B07A22;
+      --peer: #5B9FED;
+      --report: #6BCB8A;
+      --line: rgba(230, 234, 240, 0.08);
+      --glow: rgba(232, 168, 56, 0.25);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+      background: var(--void);
+      color: var(--chalk);
+      line-height: 1.55;
+      min-height: 100vh;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(232, 168, 56, 0.07), transparent),
+        radial-gradient(ellipse 40% 40% at 100% 60%, rgba(91, 159, 237, 0.05), transparent),
+        linear-gradient(rgba(230, 234, 240, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(230, 234, 240, 0.03) 1px, transparent 1px);
+      background-size: auto, auto, 48px 48px, 48px 48px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .shell {
+      position: relative;
+      z-index: 1;
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+    }
+
+    header.mast {
+      padding: 2.5rem 0 2rem;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 2.5rem;
+      animation: rise 0.7s ease both;
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .brand {
+      font-family: "Syne", sans-serif;
+      font-weight: 800;
+      font-size: clamp(2.4rem, 6vw, 3.8rem);
+      letter-spacing: -0.04em;
+      line-height: 0.95;
+      color: var(--chalk);
+    }
+
+    .brand span {
+      color: var(--signal);
+    }
+
+    .mast-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.5rem;
+      margin-top: 1.25rem;
+      align-items: center;
+    }
+
+    .badge {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.72rem;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--signal);
+      border: 1px solid var(--signal-dim);
+      padding: 0.3rem 0.65rem;
+      background: rgba(232, 168, 56, 0.08);
+    }
+
+    .lede {
+      color: var(--mute);
+      max-width: 36rem;
+      font-size: 1.05rem;
+    }
+
+    nav.toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 2.5rem;
+      animation: rise 0.7s 0.1s ease both;
+    }
+
+    nav.toc a {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.75rem;
+      color: var(--mute);
+      text-decoration: none;
+      padding: 0.4rem 0.7rem;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+
+    nav.toc a:hover,
+    nav.toc a:focus-visible {
+      color: var(--chalk);
+      border-color: var(--signal-dim);
+      background: var(--panel-2);
+      outline: none;
+    }
+
+    section {
+      margin-bottom: 3.5rem;
+      animation: rise 0.6s ease both;
+    }
+
+    section:nth-of-type(1) { animation-delay: 0.12s; }
+    section:nth-of-type(2) { animation-delay: 0.18s; }
+    section:nth-of-type(3) { animation-delay: 0.24s; }
+    section:nth-of-type(4) { animation-delay: 0.3s; }
+    section:nth-of-type(5) { animation-delay: 0.36s; }
+    section:nth-of-type(6) { animation-delay: 0.42s; }
+    section:nth-of-type(7) { animation-delay: 0.48s; }
+
+    .sec-label {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--signal);
+      margin-bottom: 0.5rem;
+    }
+
+    h2 {
+      font-family: "Syne", sans-serif;
+      font-weight: 700;
+      font-size: 1.65rem;
+      letter-spacing: -0.02em;
+      margin-bottom: 1rem;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 1.25rem;
+    }
+
+    /* Switchboard */
+    .board {
+      position: relative;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 1.5rem 1rem 1.25rem;
+      overflow: hidden;
+    }
+
+    .board-hint {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.68rem;
+      color: var(--mute);
+      letter-spacing: 0.04em;
+      margin-bottom: 1rem;
+      text-align: center;
+    }
+
+    .switchboard {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.25rem;
+      justify-items: center;
+    }
+
+    .tier {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.65rem;
+      width: 100%;
+    }
+
+    .tier-label {
+      width: 100%;
+      text-align: center;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.65rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--mute);
+      margin-bottom: 0.15rem;
+    }
+
+    .node {
+      position: relative;
+      min-width: 7.5rem;
+      padding: 0.85rem 1rem;
+      background: var(--panel-2);
+      border: 1px solid rgba(230, 234, 240, 0.12);
+      cursor: default;
+      transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+      text-align: center;
+    }
+
+    .node[data-id="you"] {
+      border-radius: 999px;
+      min-width: 5.5rem;
+      background: transparent;
+      border-color: var(--mute);
+    }
+
+    .node[data-id="orch"] {
+      border-color: var(--signal);
+      box-shadow: 0 0 0 1px rgba(232, 168, 56, 0.2), 0 0 28px var(--glow);
+      min-width: 11rem;
+    }
+
+    .node.is-hot {
+      border-color: var(--signal);
+      box-shadow: 0 0 20px var(--glow);
+      transform: translateY(-2px);
+      z-index: 2;
+    }
+
+    .node.is-dim {
+      opacity: 0.35;
+    }
+
+    .node-name {
+      font-family: "Syne", sans-serif;
+      font-weight: 700;
+      font-size: 0.95rem;
+      letter-spacing: -0.01em;
+    }
+
+    .node-skill {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.65rem;
+      color: var(--mute);
+      margin-top: 0.25rem;
+    }
+
+    .node-mode {
+      display: none;
+      margin-top: 0.45rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.6rem;
+      letter-spacing: 0.04em;
+      color: var(--signal);
+    }
+
+    .node.is-hot .node-mode { display: block; }
+
+    .link-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      justify-content: center;
+      margin-top: 1.25rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+    }
+
+    .leg {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.68rem;
+      color: var(--mute);
+    }
+
+    .swatch {
+      width: 1.4rem;
+      height: 2px;
+    }
+
+    .swatch.delegate { background: var(--signal); }
+    .swatch.report { background: var(--report); }
+    .swatch.peer { background: var(--peer); }
+
+    .rails {
+      width: 2px;
+      height: 1.1rem;
+      background: linear-gradient(var(--signal), var(--signal-dim));
+      opacity: 0.5;
+      margin: -0.3rem auto;
+    }
+
+    ul.bullets {
+      list-style: none;
+      display: grid;
+      gap: 0.65rem;
+    }
+
+    ul.bullets li {
+      position: relative;
+      padding-left: 1.1rem;
+      color: var(--mute);
+      font-size: 0.98rem;
+    }
+
+    ul.bullets li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.55rem;
+      width: 0.4rem;
+      height: 0.4rem;
+      background: var(--signal);
+    }
+
+    ul.bullets li strong { color: var(--chalk); font-weight: 600; }
+
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+
+    th, td {
+      text-align: left;
+      padding: 0.75rem 0.85rem;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+
+    th {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.68rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--mute);
+      font-weight: 500;
+    }
+
+    td:first-child {
+      font-family: "Syne", sans-serif;
+      font-weight: 700;
+      color: var(--chalk);
+      white-space: nowrap;
+    }
+
+    code {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.82em;
+      color: var(--peer);
+      background: rgba(91, 159, 237, 0.08);
+      padding: 0.1rem 0.35rem;
+    }
+
+    .life-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    @media (max-width: 700px) {
+      .life-grid { grid-template-columns: 1fr; }
+    }
+
+    .life-card {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      padding: 1.1rem;
+    }
+
+    .life-card h3 {
+      font-family: "Syne", sans-serif;
+      font-size: 1.1rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .life-card p {
+      color: var(--mute);
+      font-size: 0.92rem;
+    }
+
+    .life-card .tag {
+      display: inline-block;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.62rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--signal);
+      margin-bottom: 0.5rem;
+    }
+
+    .mermaid {
+      background: var(--panel);
+      padding: 1rem;
+      overflow-x: auto;
+    }
+
+    .open-list {
+      list-style: none;
+      display: grid;
+      gap: 0.55rem;
+      counter-reset: open;
+    }
+
+    .open-list li {
+      counter-increment: open;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.75rem;
+      align-items: start;
+      padding: 0.85rem 1rem;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--mute);
+    }
+
+    .open-list li::before {
+      content: counter(open, decimal-leading-zero);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.75rem;
+      color: var(--signal);
+      padding-top: 0.15rem;
+    }
+
+    footer.foot {
+      border-top: 1px solid var(--line);
+      padding-top: 1.5rem;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.72rem;
+      color: var(--mute);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+      justify-content: space-between;
+    }
+
+    footer.foot a {
+      color: var(--peer);
+      text-decoration: none;
+    }
+
+    footer.foot a:hover { text-decoration: underline; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="mast">
+      <p class="brand">Multi<span>Agency</span></p>
+      <div class="mast-meta">
+        <span class="badge">Phase 1 COMPLETE · Phase 2 C+D proven</span>
+        <p class="lede">Orchestrator hub with compound-engineering specialists. Hybrid file bus + lean extension. Living review board — synced 2026-07-12.</p>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="Sections">
+      <a href="#board">Switchboard</a>
+      <a href="#overview">Overview</a>
+      <a href="#runtime">Runtime</a>
+      <a href="#spawn">Spawn rules</a>
+      <a href="#subagent-core">Sub-agent core</a>
+      <a href="#roles">Agents</a>
+      <a href="#skill-binding">Skill binding</a>
+      <a href="#phase1">Phase 1 exit</a>
+      <a href="#phase2">Phase 2</a>
+      <a href="#lifecycle">Lifecycle</a>
+      <a href="#memory">Memory</a>
+      <a href="#comms">Comms</a>
+      <a href="#flow">Request flow</a>
+      <a href="#open">Decisions log</a>
+    </nav>
+
+    <section id="board">
+      <p class="sec-label">System map</p>
+      <h2>Switchboard</h2>
+      <div class="board">
+        <p class="board-hint">Hover an agent to see who it talks to</p>
+        <div class="switchboard" id="switchboard">
+          <div class="tier">
+            <div class="tier-label">External</div>
+            <div class="node" data-id="you" data-links="orch" tabindex="0">
+              <div class="node-name">You</div>
+            </div>
+          </div>
+          <div class="rails" aria-hidden="true"></div>
+          <div class="tier">
+            <div class="tier-label">Orchestration</div>
+            <div class="node" data-id="orch" data-links="you brainstorm plan work debug coderev docrev scout" tabindex="0">
+              <div class="node-name">Orchestrator</div>
+              <div class="node-skill">route · delegate · mediate · lifecycle</div>
+              <div class="node-mode">temp + persistent control</div>
+            </div>
+          </div>
+          <div class="rails" aria-hidden="true"></div>
+          <div class="tier">
+            <div class="tier-label">Specialists</div>
+            <div class="node" data-id="brainstorm" data-links="orch plan" tabindex="0">
+              <div class="node-name">Brainstorm</div>
+              <div class="node-skill">ce-brainstorm</div>
+              <div class="node-mode">peer → Plan</div>
+            </div>
+            <div class="node" data-id="plan" data-links="orch brainstorm work scout" tabindex="0">
+              <div class="node-name">Plan</div>
+              <div class="node-skill">ce-plan</div>
+              <div class="node-mode">peer ↔ Brainstorm, Work, Scout</div>
+            </div>
+            <div class="node" data-id="work" data-links="orch plan" tabindex="0">
+              <div class="node-name">Work</div>
+              <div class="node-skill">ce-work</div>
+              <div class="node-mode">peer → Plan</div>
+            </div>
+            <div class="node" data-id="debug" data-links="orch" tabindex="0">
+              <div class="node-name">Debug</div>
+              <div class="node-skill">ce-debug</div>
+              <div class="node-mode">via Orchestrator</div>
+            </div>
+            <div class="node" data-id="coderev" data-links="orch docrev" tabindex="0">
+              <div class="node-name">Code Reviewer</div>
+              <div class="node-skill">ce-code-review</div>
+              <div class="node-mode">peer → Doc Reviewer</div>
+            </div>
+            <div class="node" data-id="docrev" data-links="orch coderev" tabindex="0">
+              <div class="node-name">Doc Reviewer</div>
+              <div class="node-skill">ce-doc-review</div>
+              <div class="node-mode">peer → Code Reviewer</div>
+            </div>
+            <div class="node" data-id="scout" data-links="orch plan" tabindex="0">
+              <div class="node-name">Scout</div>
+              <div class="node-skill">scout · repo-recon / prior-art / reference-repo</div>
+              <div class="node-mode">peer → Plan · optional --cwd</div>
+            </div>
+          </div>
+        </div>
+        <div class="link-legend">
+          <div class="leg"><span class="swatch delegate"></span> delegate</div>
+          <div class="leg"><span class="swatch report"></span> report back</div>
+          <div class="leg"><span class="swatch peer"></span> controlled peer</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="overview">
+      <p class="sec-label">Principles</p>
+      <h2>Overview</h2>
+      <div class="panel">
+        <ul class="bullets">
+          <li><strong>You</strong> talk only to the Orchestrator.</li>
+          <li>The <strong>Orchestrator</strong> routes each request to the right specialist.</li>
+          <li>Sub-agents inherit behavior from <strong>compound-engineering skills</strong>.</li>
+          <li>Every sub-agent runs in its own <strong><a href="https://cmux.com/docs/getting-started" style="color: var(--peer);">cmux</a></strong> pane — one visible pi session per specialist.</li>
+          <li>Inter-agent messaging: <strong>hybrid file bus + cmux notify</strong> (pi-intercom demoted after live-run friction).</li>
+          <li>Sub-agents may talk to each other under an <strong>explicit allowlist</strong>; all report back to the Orchestrator.</li>
+          <li>The Orchestrator may <strong>relay or mediate</strong> between agents when needed.</li>
+          <li>Agents can be <strong>temporary</strong> or <strong>persistent</strong> — Orchestrator decides per agent.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="runtime">
+      <p class="sec-label">Execution</p>
+      <h2>Runtime and infrastructure</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;">Each specialist is a <strong style="color: var(--chalk);">pi session in a cmux pane</strong>. The Orchestrator also runs in cmux. Agents do not share one terminal.</p>
+      <div class="life-grid">
+        <div class="life-card">
+          <div class="tag">cmux</div>
+          <h3>One pane per agent</h3>
+          <p>Vertical tabs, notification panel, CLI/socket API for automation. Session restore + pi hooks (<code>cmux hooks setup</code>) let persistent agents resume with <code>pi --session &lt;id&gt;</code>.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Hybrid bus</div>
+          <h3>Files + notify</h3>
+          <p>Delegation/reports as JSON under <code>.pi/agency/inbox/</code>. <code>cmux notify</code> / pane flash for attention. Not a cmux message bus — cmux has no agent↔agent mailbox.</p>
+        </div>
+      </div>
+      <div class="mermaid" style="margin-top: 1rem;">
+flowchart TB
+    User([You])
+    OrchPane[Orchestrator pane in cmux]
+    BrainPane[Brainstorm pane]
+    PlanPane[Plan pane]
+    WorkPane[Work pane]
+    OtherPanes[Other specialist panes]
+    User <-->|tasks| OrchPane
+    OrchPane -->|agency_spawn / cmux| BrainPane
+    OrchPane -->|agency_spawn / cmux| PlanPane
+    OrchPane -->|agency_spawn / cmux| WorkPane
+    OrchPane -->|agency_spawn / cmux| OtherPanes
+    BrainPane <-->|file bus + notify| OrchPane
+    PlanPane <-->|file bus + notify| OrchPane
+    WorkPane <-->|file bus + notify| OrchPane
+    OtherPanes <-->|file bus + notify| OrchPane
+    BrainPane <-->|peer allowlist| PlanPane
+    PlanPane <-->|peer allowlist| WorkPane
+      </div>
+      <div class="panel" style="margin-top: 1rem;">
+        <ul class="bullets">
+          <li><strong>Spawn rules:</strong> see <a href="#spawn" style="color: var(--peer);">Spawn rules</a> — open vs reuse, naming, cwd, boot/teardown, Plan twin.</li>
+          <li><strong>Control plane:</strong> <code>agency_*</code> tools → <code>agency_ctl.py</code> · messaging via <code>bus.py</code>.</li>
+          <li><strong>Docs:</strong> <a href="https://cmux.com/docs/getting-started" style="color: var(--peer);">cmux getting started</a> · <a href="https://cmux.com/docs/session-restore" style="color: var(--peer);">session restore</a></li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="spawn">
+      <p class="sec-label">Policy</p>
+      <h2>Spawn rules (v0)</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;">Only the <strong style="color: var(--chalk);">Orchestrator</strong> opens, reuses, promotes, or releases panes. Phase 2 control: <code>agency_spawn</code> / <code>agency_ctl.py</code> + <code>sessions.json</code>.</p>
+
+      <div class="life-grid" style="margin-top: 0;">
+        <div class="life-card">
+          <div class="tag">Open vs reuse</div>
+          <h3>Prefer idle persistents</h3>
+          <p>Idle healthy instance of role → reuse. Stale/dead pane rows cleared by reconcile. Cap at <strong>6</strong> specialist panes (<code>spawn.maxSpecialistPanes</code>).</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Writers + twins</div>
+          <h3>Work exclusive · Plan twin ok</h3>
+          <p><strong>Work never twins</strong> (<code>allowWorkTwin: false</code>) — queue. Busy Plan may spawn <strong>one</strong> temp <code>plan-t*</code> twin (<code>allowPlanTempTwin: true</code>, <code>maxTempTwinsPerRole: 1</code>).</p>
+        </div>
+      </div>
+
+      <div class="panel table-wrap" style="margin-top: 1rem;">
+        <table>
+          <thead>
+            <tr><th>Kind</th><th>Instance name</th><th>cwd</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Orchestrator</td><td><code>orchestrator</code></td><td>project root</td></tr>
+            <tr><td>Persistent specialist</td><td>role id (<code>plan</code>, <code>work</code>, …)</td><td>project root</td></tr>
+            <tr><td>Temporary specialist</td><td><code>role-t{short}</code></td><td>project root</td></tr>
+            <tr><td>Scout reference-repo</td><td><code>scout-t*</code></td><td>optional <code>--cwd</code> / <code>agency_spawn.cwd</code>; <code>AGENCY_ROOT</code> still this project’s <code>.pi/agency</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel" style="margin-top: 1rem;">
+        <ul class="bullets">
+          <li><strong>Boot (hardened):</strong> write manifest <code>starting</code> → cmux split → <code>pi --approve --name … "$(cat artifacts/_boot/&lt;name&gt;.txt)"</code> so the first turn starts without a manual paste → mark idle → delegate. Optional <code>--nudge</code> fallback after <code>--boot-wait</code> (default 5s).</li>
+          <li><strong>Temp teardown:</strong> after complete/fail → close pane, clear row.</li>
+          <li><strong>Persistent:</strong> mark idle and keep pane; release only on explicit end-of-workflow.</li>
+          <li><strong>Promote:</strong> temp still needed → set <code>lifecycle: persistent</code> (rename to role id if free).</li>
+          <li><strong>Memory init:</strong> Plan/Work spawn also runs <code>memory.py init</code> for <code>.pi/agency/memory/&lt;name&gt;/NOTES.md</code>.</li>
+        </ul>
+      </div>
+
+      <div class="mermaid" style="margin-top: 1rem;">
+flowchart TB
+  Need[Need role R]
+  List[agency_list / sessions.json + reconcile]
+  Idle{Idle healthy R?}
+  Working{R working?}
+  Reuse[Reuse + delegate]
+  Cap{Under max 6?}
+  Twin{Plan busy + allow twin?}
+  Spawn[Spawn pane]
+  Queue[Queue: no Work twin]
+  Fail[Refuse spawn]
+  Need --> List --> Idle
+  Idle -->|yes| Reuse
+  Idle -->|no| Working
+  Working -->|Work| Queue
+  Working -->|Plan| Twin
+  Working -->|other| Cap
+  Twin -->|yes temp plan-t| Cap
+  Twin -->|no| Queue
+  Cap -->|yes| Spawn
+  Cap -->|no| Fail
+      </div>
+    </section>
+
+    <section id="subagent-core">
+      <p class="sec-label">Core design</p>
+      <h2>Sub-agent core architecture</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;"><strong style="color: var(--chalk);">We will not use pi-subagents.</strong> Custom orchestration layer — inspired by task contracts and named sessions, without chains, fork context, worktrees, or built-in agent roster.</p>
+
+      <div class="panel" style="margin-bottom: 1rem;">
+        <ul class="bullets">
+          <li><strong>Persona</strong> — CE skill–grounded specialist role (Scout = custom skill)</li>
+          <li><strong>Process</strong> — dedicated pi session in a cmux pane</li>
+          <li><strong>Address</strong> — stable instance / inbox name for bus delegate / report</li>
+        </ul>
+      </div>
+
+      <div class="panel table-wrap" style="margin-bottom: 1rem;">
+        <table>
+          <thead>
+            <tr>
+              <th>Concept</th>
+              <th>What it holds</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Agent type</td>
+              <td>Template: role id, CE skill, tools, peer ACL, default lifecycle</td>
+            </tr>
+            <tr>
+              <td>Agent instance</td>
+              <td>Runtime: intercomName, cmux surface, status, task id, cwd</td>
+            </tr>
+            <tr>
+              <td>Delegation packet</td>
+              <td>Goal, context paths, success criteria, constraints, output, stop rules, <code>memoryPath</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 style="font-family: Syne, sans-serif; font-size: 1.15rem; margin-bottom: 0.75rem;">Implementation options</h3>
+      <div class="life-grid" style="margin-bottom: 1rem;">
+        <div class="life-card">
+          <div class="tag">A · Done</div>
+          <h3>Orchestrator + shell</h3>
+          <p>cmux CLI + early intercom / hybrid bus. <code>agents.yaml</code> for types. Proven in Phase 1.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">B · Done</div>
+          <h3>Session registry</h3>
+          <p><code>.pi/agency/sessions.json</code> + reconcile. Durable without extension; still used under C.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">C · Done v1</div>
+          <h3>Lean pi extension</h3>
+          <p><code>agency_spawn</code> / <code>list</code> / <code>delegate</code> / <code>wait</code> / <code>release</code> → <code>agency_ctl.py</code>. Owns cmux + manifest; messaging stays on <code>bus.py</code> + notify.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">D · Done v1</div>
+          <h3>Pi agent files</h3>
+          <p>All seven roles under <code>.pi/agents/&lt;role&gt;.md</code>; CE skill on demand via <code>skillPath</code>.</p>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom: 1rem;">
+        <ul class="bullets">
+          <li><strong>Path taken:</strong> Phase 1 = A → B; Phase 2 = C + D — <strong>both phases proven</strong> (C+D golden path 2026-07-12).</li>
+          <li><strong>Only Orchestrator</strong> spawns, releases, and routes — specialists escalate via bus <code>ask</code>.</li>
+          <li><strong>Excluded from pi-subagents:</strong> chains, parallel DSL, fork/fresh, worktrees, supervisor bridge, nested spawn, runtime agent CRUD</li>
+        </ul>
+      </div>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant O as Orchestrator
+    participant R as agency_ctl
+    participant C as cmux
+    participant S as Specialist
+    O->>R: agency_spawn role=plan
+    R->>C: new-split + start pi with bootfile
+    C->>S: first turn = boot prompt
+    O->>S: bus delegate + cmux notify
+    S->>O: bus report + notify
+      </div>
+    </section>
+
+    <section id="roles">
+      <p class="sec-label">Lineup</p>
+      <h2>Agent roles</h2>
+      <div class="panel table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>Skill basis</th>
+              <th>Primary behavior</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Orchestrator</td>
+              <td><code>.pi/agency/skills/orchestrator/</code></td>
+              <td>Intake, routing, delegation, synthesis, mediation, lifecycle</td>
+            </tr>
+            <tr>
+              <td>Brainstorm</td>
+              <td><code>ce-brainstorm</code></td>
+              <td>Explore ideas, scope, requirements-only plans</td>
+            </tr>
+            <tr>
+              <td>Plan</td>
+              <td><code>ce-plan</code></td>
+              <td>Implementation-ready structured plans · NOTES memory</td>
+            </tr>
+            <tr>
+              <td>Work</td>
+              <td><code>ce-work</code></td>
+              <td>Execute plans, ship code · NOTES + docs/solutions</td>
+            </tr>
+            <tr>
+              <td>Debug</td>
+              <td><code>ce-debug</code></td>
+              <td>Reproduce, trace root cause, fix bugs</td>
+            </tr>
+            <tr>
+              <td>Code Reviewer</td>
+              <td><code>ce-code-review</code></td>
+              <td>Structured code review before merge</td>
+            </tr>
+            <tr>
+              <td>Doc Reviewer</td>
+              <td><code>ce-doc-review</code></td>
+              <td>Review requirements, plans, specs</td>
+            </tr>
+            <tr>
+              <td>Scout</td>
+              <td><code>.pi/agency/skills/scout/</code></td>
+              <td>Modes: <code>repo-recon</code> · <code>prior-art</code> · <code>reference-repo</code> (optional <code>--cwd</code>)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="skill-binding">
+      <p class="sec-label">Personas</p>
+      <h2>Skill binding (v0)</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;"><strong style="color: var(--chalk);">Layered binding</strong> — short persona charter in-session + CE <code>SKILL.md</code> read on task start. No full skill paste into the system prompt.</p>
+
+      <div class="life-grid" style="margin-top: 0;">
+        <div class="life-card">
+          <div class="tag">Charter</div>
+          <h3>Always loaded</h3>
+          <p>Mission, hard constraints, bus protocol, ACL, output/stop rules, path to skill. Phase 2: <code>.pi/agents/&lt;role&gt;.md</code> via <code>--append-system-prompt</code>.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">CE / custom playbook</div>
+          <h3>Read on demand</h3>
+          <p>Full procedure from <code>skillPath</code> in <code>agents.yaml</code>. “Ask the user” → bus <code>ask</code> to Orchestrator. Scout uses custom skill (not ce-ideate/ce-sweep).</p>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top: 1rem;">
+        <ul class="bullets">
+          <li><strong>Rejected:</strong> full <code>SKILL.md</code> as system prompt (too large, wrong ask-user semantics).</li>
+          <li><strong>Rejected:</strong> summary-only with no CE file (drifts from CE behavior).</li>
+          <li><strong>Charters:</strong> all seven under <code>.pi/agency/charters/</code> (hybrid bus).</li>
+          <li><strong>Agent files:</strong> all seven under <code>.pi/agents/</code> (Option D).</li>
+          <li><strong>Optional later:</strong> distilled Core Principles excerpt in the charter if cold-start quality needs it.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="phase1">
+      <p class="sec-label">Prototype · COMPLETE</p>
+      <h2>Phase 1 exit criteria</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;">Phase 1 <strong style="color: var(--chalk);">PASSED</strong> — Options A + B proved the loop end-to-end (hybrid bus + stale reconcile). Unlocked Phase 2 (C + D).</p>
+
+      <div class="panel table-wrap" style="margin-bottom: 1rem;">
+        <table>
+          <thead>
+            <tr><th>#</th><th>Hard gate</th><th>Status</th><th>Pass signal</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td>cmux spawn</td><td><strong>PASS</strong></td><td>Pane opens; pi boots</td></tr>
+            <tr><td>2</td><td>Named instance</td><td><strong>PASS</strong></td><td>Inbox / <code>sessions.json</code> names (<code>scout-t*</code>, <code>plan</code>, …)</td></tr>
+            <tr><td>3</td><td>Manifest</td><td><strong>PASS</strong></td><td><code>sessions.json</code> starting → working → clear on release</td></tr>
+            <tr><td>4</td><td>Delegation packet</td><td><strong>PASS</strong></td><td><code>bus.py send --type delegate</code> envelopes</td></tr>
+            <tr><td>5</td><td>Layered skill bind</td><td><strong>PASS</strong></td><td>Read <code>skillPath</code>; no full SKILL paste</td></tr>
+            <tr><td>6</td><td>Report back</td><td><strong>PASS</strong></td><td>Reports in orchestrator inbox + artifacts</td></tr>
+            <tr><td>7</td><td>Golden path</td><td><strong>PASS</strong></td><td>Scout → Brainstorm → Plan (transport migrated mid-run)</td></tr>
+            <tr><td>8</td><td>Temp teardown</td><td><strong>PASS</strong></td><td>Close pane + clear manifest</td></tr>
+            <tr><td>9</td><td>Persistent reuse</td><td><strong>PASS</strong></td><td>Second Plan task without respawn</td></tr>
+            <tr><td>10</td><td>Stale recovery</td><td><strong>PASS</strong></td><td><code>reconcile-sessions.py</code> cleared dead rows</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="life-grid">
+        <div class="life-card">
+          <div class="tag">In scope</div>
+          <h3>Prove the loop</h3>
+          <p>Three roles, Orchestrator-only mediation, shell spawn + manifest + hybrid bus.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Was deferred</div>
+          <h3>Moved to Phase 2</h3>
+          <p>Lean extension, all seven agent files, peer ACL enforcement, resume hooks — most now done (see Phase 2).</p>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top: 1rem;">
+        <ul class="bullets">
+          <li><strong>Deliverables:</strong> <code>agents.yaml</code>, <code>sessions.json</code>, charters, Orchestrator skill, <code>bus-spec.md</code>, <code>bus.py</code>, <code>reconcile-sessions.py</code>.</li>
+          <li><strong>Sign-off:</strong> golden path + temp teardown + persistent reuse + stale recovery — <strong>complete</strong>.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="phase2">
+      <p class="sec-label">Durable · largely done</p>
+      <h2>Phase 2 progress</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;">Option C + D golden path proven 2026-07-12. Artifacts: <code>.pi/agency/artifacts/cd-golden-1/</code> · plan <code>docs/plans/2026-07-12-002-feat-option-cd-golden-path-acceptance-plan.md</code>.</p>
+
+      <div class="life-grid" style="margin-top: 0;">
+        <div class="life-card">
+          <div class="tag">Done</div>
+          <h3>Option C + D</h3>
+          <p><code>.pi/extensions/multi-agency/</code> + <code>agency_ctl.py</code>; all seven <code>.pi/agents/*.md</code>; remaining charters (Work/Debug/CodeRev/DocRev).</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Done</div>
+          <h3>Scout · memory · boot · capacity</h3>
+          <p>Custom Scout skill + <code>--cwd</code>; <code>memory-spec.md</code> + NOTES; bootfile first turn; max 6 / Plan twin / no Work twin.</p>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top: 1rem;">
+        <ul class="bullets">
+          <li><strong>C+D golden:</strong> Scout → Brainstorm (ask/reply) → Plan + reuse via <code>agency_*</code> tools.</li>
+          <li><strong>Async handoff:</strong> spawn → delegate → <code>agency_wait(taskId)</code> (retry wait on timeout/Esc; respawn only if pane dead).</li>
+          <li><strong>Boot smoke:</strong> scout claimed + reported after spawn without manual cmux paste (quoted <code>$(cat bootfile)</code>).</li>
+          <li><strong>Still soft / later:</strong> cmux session-restore resume hooks; peer ACL enforcement beyond hub mediation; optional <code>agency_run</code> sugar.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="lifecycle">
+      <p class="sec-label">Lifecycle</p>
+      <h2>Sub-agent lifecycle</h2>
+      <p style="color: var(--mute); margin-bottom: 0.75rem;">Spawn rules = <em>how</em>. Heuristics = <em>when</em>. Prefer reuse of idle persistents; Work/Plan default persistent; Scout/reviews default temporary.</p>
+      <div class="life-grid">
+        <div class="life-card">
+          <div class="tag">Temporary</div>
+          <h3>One-shot / burst</h3>
+          <p>Scout, Brainstorm, Debug, reviewers by default. Tear down after task. Plan may get one temp twin when persistent Plan is busy.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Persistent</div>
+          <h3>Multi-step + NOTES</h3>
+          <p>Plan and Work by default. Keep pane; mark idle between tasks. Survive via pane context + <code>NOTES.md</code> + artifacts (see Memory).</p>
+        </div>
+      </div>
+      <div class="panel" style="margin-top: 1rem;">
+        <ul class="bullets">
+          <li><strong>Reuse</strong> idle persistent before spawning.</li>
+          <li><strong>Never</strong> a second Work instance (<code>allowWorkTwin: false</code>).</li>
+          <li><strong>Busy Plan:</strong> one <code>plan-t*</code> twin allowed under the pane cap.</li>
+          <li><strong>Golden path:</strong> temp Scout → temp Brainstorm → persistent Plan (second Plan task proves reuse) — proven twice (Phase 1 + C+D).</li>
+          <li><strong>Release</strong> persistents when the workflow ends (or user asks).</li>
+        </ul>
+      </div>
+      <div class="mermaid" style="margin-top: 1rem;">
+flowchart TB
+  Task[Need role R]
+  Idle{Idle persistent?}
+  Multi{2+ tasks likely?}
+  Reuse[Reuse]
+  Persist[Persistent]
+  Temp[Temporary]
+  Task --> Idle
+  Idle -->|yes| Reuse
+  Idle -->|no| Multi
+  Multi -->|yes| Persist
+  Multi -->|no| Temp
+      </div>
+    </section>
+
+    <section id="memory">
+      <p class="sec-label">Persistence</p>
+      <h2>Persistent agent memory (v0)</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;">What survives across Plan/Work delegations. Spec: <code>.pi/agency/memory-spec.md</code> · helper: <code>memory.py</code>.</p>
+      <div class="panel table-wrap" style="margin-bottom: 1rem;">
+        <table>
+          <thead>
+            <tr><th>Layer</th><th>Survives</th><th>Where</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Pane context</td><td>Until teardown</td><td>Live pi session</td></tr>
+            <tr><td>Instance NOTES</td><td>Across idle→working</td><td><code>.pi/agency/memory/&lt;name&gt;/NOTES.md</code></td></tr>
+            <tr><td>Workflow artifacts</td><td>Forever (repo)</td><td><code>.pi/agency/artifacts/</code>, <code>docs/plans/</code>, …</td></tr>
+            <tr><td>Compound solutions</td><td>Forever (repo)</td><td><code>docs/solutions/</code> via ce-compound (Work)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <ul class="bullets">
+          <li>On reuse, Orchestrator puts <code>memoryPath</code> in delegate <code>contextPaths</code>.</li>
+          <li>Specialist appends a Log line on each successful report.</li>
+          <li>Work writes durable learnings to <code>docs/solutions/</code>; bus carries <strong>paths only</strong>.</li>
+          <li>Plan does not write <code>docs/solutions/</code> by default.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="comms">
+      <p class="sec-label">ACL + transport</p>
+      <h2>Peer ACL + hybrid bus</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;"><strong style="color: var(--chalk);">Static allowlist</strong> in <code>agents.yaml</code>. Transport: <strong style="color: var(--chalk);">filesystem envelopes + cmux notify</strong>. cmux has no agent↔agent mailbox — only pane control + human attention.</p>
+
+      <div class="life-grid" style="margin-bottom: 1rem;">
+        <div class="life-card">
+          <div class="tag">Content</div>
+          <h3>File bus</h3>
+          <p><code>.pi/agency/inbox/&lt;to&gt;/</code> JSON envelopes; large results under <code>artifacts/</code>. Durable, no 10m ask timeout.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Attention</div>
+          <h3>cmux notify</h3>
+          <p><code>cmux notify</code> / OSC / pane flash wakes Orchestrator or human. Optional short <code>cmux send</code> nudge into a pane.</p>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-bottom: 1rem;">
+        <ul class="bullets">
+          <li><strong>Always:</strong> You ↔ Orchestrator; Orchestrator ↔ any specialist; specialists never message you directly.</li>
+          <li><strong>Missing edge:</strong> Orchestrator mediates (forward) or refuses.</li>
+          <li><strong>Temps:</strong> inherit their role’s <code>peers</code> list.</li>
+          <li><strong>pi-intercom:</strong> optional/legacy only after live-run friction.</li>
+        </ul>
+      </div>
+
+      <div class="panel table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>From \\ To</th>
+              <th>Brain</th>
+              <th>Plan</th>
+              <th>Work</th>
+              <th>Debug</th>
+              <th>CodeRev</th>
+              <th>DocRev</th>
+              <th>Scout</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Brainstorm</td><td>—</td><td>Y</td><td></td><td></td><td></td><td>Y</td><td></td></tr>
+            <tr><td>Plan</td><td>Y</td><td>—</td><td>Y</td><td></td><td></td><td></td><td>Y</td></tr>
+            <tr><td>Work</td><td></td><td>Y</td><td>—</td><td>Y</td><td>Y</td><td></td><td></td></tr>
+            <tr><td>Debug</td><td></td><td></td><td>Y</td><td>—</td><td>Y</td><td></td><td></td></tr>
+            <tr><td>CodeRev</td><td></td><td></td><td></td><td></td><td>—</td><td>Y</td><td></td></tr>
+            <tr><td>DocRev</td><td>Y</td><td>Y</td><td></td><td></td><td>Y</td><td>—</td><td></td></tr>
+            <tr><td>Scout</td><td>Y</td><td>Y</td><td></td><td></td><td></td><td></td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="flow">
+      <p class="sec-label">Example</p>
+      <h2>Request flow</h2>
+      <div class="mermaid">
+sequenceDiagram
+    actor U as You
+    participant O as Orchestrator
+    participant S as Scout
+    participant B as Brainstorm
+    participant P as Plan
+    U->>O: Explore auth options
+    Note over O: agency_spawn if needed
+    O->>S: agency_delegate + notify
+    O->>O: agency_wait(taskId)
+    S-->>O: report (or re-wait / respawn on dead)
+    O->>B: agency_delegate with scout paths
+    O->>O: agency_wait
+    B-->>O: requirements artifact + report
+    O->>P: agency_delegate plan
+    O->>O: agency_wait
+    P-->>O: ready plan path + report
+    O-->>U: synthesized answer
+      </div>
+    </section>
+
+    <section id="open">
+      <p class="sec-label">Log</p>
+      <h2>Decisions &amp; progress</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;">No blocking open items from the Phase 1/2 architecture backlog. Soft follow-ups listed at the bottom.</p>
+      <ol class="open-list">
+        <li><s>Sub-agent core</s> — A → B then C + D</li>
+        <li><s>Spawn rules</s> — reuse idle, one Work writer, max 6 panes, naming, boot/teardown</li>
+        <li><s>Skill binding</s> — layered charter + on-demand CE skill read</li>
+        <li><s>Phase 1 exit</s> — COMPLETE: gates 1–10 PASS (hybrid bus + stale reconcile)</li>
+        <li><s>Peer ACL</s> — static peers allowlist; Phase 1 hub-only</li>
+        <li><s>Lifecycle heuristics</s> — role defaults + promote on 2nd related task</li>
+        <li><s>Communication transport</s> — hybrid file bus + cmux notify (intercom demoted)</li>
+        <li><s>Hybrid bus details</s> — <code>.pi/agency/bus-spec.md</code></li>
+        <li><s>Bus helpers</s> — <code>bus.py</code> send/recv/done/list/init</li>
+        <li><s>Orchestrator playbook (hybrid)</s> — skill + charters on file bus</li>
+        <li><s>Charters (all seven)</s> — including Work / Debug / CodeRev / DocRev</li>
+        <li><s>Option C lean extension (v1)</s> — <code>agency_*</code> + <code>agency_ctl.py</code></li>
+        <li><s>Option D agent files</s> — all seven under <code>.pi/agents/</code></li>
+        <li><s>Option C+D golden path</s> — proven 2026-07-12 · <code>artifacts/cd-golden-1/</code></li>
+        <li><s>Scout scope</s> — custom skill modes + optional <code>--cwd</code> reference-repo</li>
+        <li><s>Persistent memory</s> — <code>memory-spec.md</code> + NOTES + Work → docs/solutions</li>
+        <li><s>Boot-nudge hardening</s> — <code>pi … "$(cat bootfile)"</code> + optional <code>--nudge</code></li>
+        <li><s>Spawn capacity</s> — max 6; Plan may one temp twin; Work never twins</li>
+        <li><s>Async handoff</s> — spawn + delegate + wait (no one-shot run); <code>agency_wait</code> by <code>taskId</code></li>
+      </ol>
+      <div class="panel" style="margin-top: 1rem;">
+        <ul class="bullets">
+          <li><strong>Soft later:</strong> cmux session-restore / <code>pi --session</code> resume after relaunch; peer ACL enforcement beyond hub mediation; boot-timing polish; optional <code>agency_run</code> sugar.</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <span>Source of truth mirror: <a href="./architecture.md">architecture.md</a></span>
+      <span>Synced 2026-07-12 · Phase 1 COMPLETE · Phase 2 C+D proven</span>
+    </footer>
+  </div>
+
+  <script>
+    const nodes = document.querySelectorAll(".node");
+    function clear() {
+      nodes.forEach((n) => {
+        n.classList.remove("is-hot", "is-dim");
+      });
+    }
+    function highlight(el) {
+      const id = el.dataset.id;
+      const links = (el.dataset.links || "").split(/\s+/).filter(Boolean);
+      const keep = new Set([id, ...links]);
+      nodes.forEach((n) => {
+        if (keep.has(n.dataset.id)) n.classList.add("is-hot");
+        else n.classList.add("is-dim");
+      });
+    }
+    nodes.forEach((n) => {
+      n.addEventListener("mouseenter", () => highlight(n));
+      n.addEventListener("focus", () => highlight(n));
+      n.addEventListener("mouseleave", clear);
+      n.addEventListener("blur", clear);
+    });
+  </script>
+</body>
+</html>

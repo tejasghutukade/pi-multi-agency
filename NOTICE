@@ -1,0 +1,11 @@
+Third-party notices
+===================
+
+Compound Engineering skills (vendored subset)
+---------------------------------------------
+Location: vendor/compound-engineering/
+Upstream: https://github.com/EveryInc/compound-engineering-plugin
+License: MIT (vendor/compound-engineering/LICENSE)
+Copyright (c) 2025 Every
+
+Only the skill trees required by Multi-Agency agents.yaml are vendored.

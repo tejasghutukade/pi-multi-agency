@@ -1,0 +1,8 @@
+Compound Engineering skills (vendored subset)
+
+Source: https://github.com/EveryInc/compound-engineering-plugin
+License: MIT (see LICENSE in this directory)
+Copyright (c) 2025 Every
+
+This package vendors only the skill trees referenced by Multi-Agency agents.yaml:
+ce-brainstorm, ce-plan, ce-work, ce-debug, ce-code-review, ce-doc-review, ce-compound.

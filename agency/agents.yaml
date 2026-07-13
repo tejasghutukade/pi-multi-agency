@@ -1,0 +1,92 @@
+# Multi-Agency agent types (Phase 2)
+# Personas: .pi/agents/<role>.md (Option D) + .pi/agency/charters/<role>.md
+# Live instances: .pi/agency/sessions.json
+
+orchestrator:
+  charterPath: .pi/agency/charters/orchestrator.md
+  skillPath: skills/agency-orchestrator/SKILL.md
+  agentPath: .pi/agents/orchestrator.md
+  intercomName: orchestrator
+  lifecycleDefault: persistent
+
+agents:
+  scout:
+    charterPath: .pi/agency/charters/scout.md
+    agentPath: .pi/agents/scout.md
+    skillPath: skills/scout/SKILL.md
+    binding: layered
+    intercomName: scout
+    lifecycleDefault: temporary
+    peers: [brainstorm, plan]
+    tools: read-only
+    # Optional: agency_ctl spawn --role scout --cwd <reference-repo> for mode reference-repo
+
+  brainstorm:
+    charterPath: .pi/agency/charters/brainstorm.md
+    agentPath: .pi/agents/brainstorm.md
+    skillPath: vendor/compound-engineering/skills/ce-brainstorm/SKILL.md
+    binding: layered
+    intercomName: brainstorm
+    lifecycleDefault: temporary
+    peers: [plan, docrev]
+    tools: default
+
+  plan:
+    charterPath: .pi/agency/charters/plan.md
+    agentPath: .pi/agents/plan.md
+    skillPath: vendor/compound-engineering/skills/ce-plan/SKILL.md
+    binding: layered
+    intercomName: plan
+    lifecycleDefault: persistent
+    peers: [brainstorm, work, scout]
+    tools: default
+
+  work:
+    charterPath: .pi/agency/charters/work.md
+    agentPath: .pi/agents/work.md
+    skillPath: vendor/compound-engineering/skills/ce-work/SKILL.md
+    binding: layered
+    intercomName: work
+    lifecycleDefault: persistent
+    peers: [plan, debug, coderev]
+    tools: default
+
+  debug:
+    charterPath: .pi/agency/charters/debug.md
+    agentPath: .pi/agents/debug.md
+    skillPath: vendor/compound-engineering/skills/ce-debug/SKILL.md
+    binding: layered
+    intercomName: debug
+    lifecycleDefault: temporary
+    peers: [work, coderev]
+    tools: default
+
+  coderev:
+    charterPath: .pi/agency/charters/coderev.md
+    agentPath: .pi/agents/coderev.md
+    skillPath: vendor/compound-engineering/skills/ce-code-review/SKILL.md
+    binding: layered
+    intercomName: coderev
+    lifecycleDefault: temporary
+    peers: [docrev]
+    tools: read-only
+
+  docrev:
+    charterPath: .pi/agency/charters/docrev.md
+    agentPath: .pi/agents/docrev.md
+    skillPath: vendor/compound-engineering/skills/ce-doc-review/SKILL.md
+    binding: layered
+    intercomName: docrev
+    lifecycleDefault: temporary
+    peers: [brainstorm, plan, coderev]
+    tools: default
+
+spawn:
+  maxSpecialistPanes: 6
+  cwd: project-root
+  intercomReadyTimeoutSec: 60
+  # Twin policy (v0): when persistent Plan is working, Orchestrator may spawn one
+  # temporary plan-t* if under maxSpecialistPanes. Work never twins.
+  allowPlanTempTwin: true
+  allowWorkTwin: false
+  maxTempTwinsPerRole: 1
