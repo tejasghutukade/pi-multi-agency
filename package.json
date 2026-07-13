@@ -1,8 +1,14 @@
 {
   "name": "@tejasghutukade/multi-agency",
-  "version": "0.1.0",
-  "description": "Orchestrator hub for multi-specialist pi sessions in cmux — hybrid file bus, agency_* tools, compound-engineering skills",
-  "keywords": ["pi-package", "pi", "cmux", "multi-agent", "orchestrator"],
+  "version": "0.3.0",
+  "description": "Orchestrator hub for multi-specialist pi sessions in cmux \u2014 hybrid file bus, agency_* tools, compound-engineering skills",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "cmux",
+    "multi-agent",
+    "orchestrator"
+  ],
   "license": "MIT",
   "author": "Tejas Ghutukade",
   "repository": {
@@ -26,8 +32,12 @@
     "NOTICE"
   ],
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

@@ -3,6 +3,7 @@
  *
  * Package scripts live next to this extension; project state is always
  * `<cwd>/.pi/agency` after `agency_init`.
+ * Lifecycle bridge (v0.3): agent_* hooks → sessions + silent-settle + hub push/queue.
  */
 
 import { spawn } from "node:child_process";
@@ -12,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { installLifecycleBridge } from "./lifecycle.ts";
 
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -94,6 +96,9 @@ function textResult(obj: unknown) {
 export default function multiAgencyExtension(pi: ExtensionAPI) {
 	const packageRoot = findPackageRoot();
 	const projectRoot = findProjectRoot(process.cwd());
+	const ctl = (args: string[], signal?: AbortSignal) => runCtl(packageRoot, projectRoot, args, signal);
+
+	installLifecycleBridge(pi, ctl);
 
 	pi.registerCommand("agency-init", {
 		description: "Scaffold .pi/agency + .pi/agents in this project from the multi-agency package",
@@ -101,7 +106,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			const force = /\b--force\b/.test(args || "");
 			const argv = ["init", "--project", projectRoot];
 			if (force) argv.push("--force");
-			const r = await runCtl(packageRoot, projectRoot, argv);
+			const r = await ctl(argv);
 			if (r.code !== 0) {
 				ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "agency_init failed", "error");
 				return;
@@ -114,12 +119,30 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agency-claim", {
 		description: "Claim this cmux surface as the Orchestrator hub",
 		handler: async (_args, ctx) => {
-			const r = await runCtl(packageRoot, projectRoot, ["claim-orchestrator"]);
+			const r = await ctl(["claim-orchestrator"]);
 			if (r.code !== 0) {
 				ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "claim failed", "error");
 				return;
 			}
 			ctx.ui.notify("Orchestrator claimed", "info");
+		},
+	});
+
+	pi.registerCommand("agency-hub", {
+		description: "Show the canonical Orchestrator hub start command (tools lock + persona)",
+		handler: async (_args, ctx) => {
+			const r = await ctl(["hub-start", "--project", projectRoot]);
+			if (r.code !== 0) {
+				ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "hub-start failed", "error");
+				return;
+			}
+			try {
+				const parsed = JSON.parse(r.stdout) as { command?: string; notes?: string[] };
+				ctx.ui.notify(parsed.command || r.stdout.trim(), "info");
+				for (const n of parsed.notes || []) ctx.ui.notify(n, "info");
+			} catch {
+				ctx.ui.notify(r.stdout.trim().slice(0, 800), "info");
+			}
 		},
 	});
 
@@ -134,7 +157,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		async execute(_id, params, signal) {
 			const args = ["init", "--project", projectRoot];
 			if (params.force) args.push("--force");
-			const r = await runCtl(packageRoot, projectRoot, args, signal);
+			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_init failed");
 			return textResult(JSON.parse(r.stdout));
 		},
@@ -147,7 +170,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		promptSnippet: "List agency specialist panes and status",
 		parameters: Type.Object({}),
 		async execute(_id, _params, signal) {
-			const r = await runCtl(packageRoot, projectRoot, ["list"], signal);
+			const r = await ctl(["list"], signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_list failed");
 			return textResult(JSON.parse(r.stdout));
 		},
@@ -163,6 +186,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			"Only the Orchestrator may call agency_spawn",
 			"Prefer --reuse semantics via reuse=true when an idle instance of the role exists",
 			"Do not spawn a second Work while one is working",
+			"After agency_delegate, do not block in agency_wait — lifecycle bridge delivers reports",
 		],
 		parameters: Type.Object({
 			role: Type.String({ description: "Agent role id from agents.yaml (e.g. scout, brainstorm, plan)" }),
@@ -186,7 +210,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.cwd) args.push("--cwd", params.cwd);
 			if (params.nudge === false) args.push("--no-nudge");
 			if (params.nudge === true) args.push("--nudge");
-			const r = await runCtl(packageRoot, projectRoot, args, signal);
+			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_spawn failed");
 			return textResult(JSON.parse(r.stdout));
 		},
@@ -195,8 +219,12 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "agency_delegate",
 		label: "Agency delegate",
-		description: "Orchestrator-only: send a hybrid-bus delegate envelope and mark the instance working",
+		description:
+			"Orchestrator-only: send a hybrid-bus delegate envelope and mark the instance working. Stay free after delegate — lifecycle bridge pushes/queues the report.",
 		promptSnippet: "Delegate a task to an agency specialist via the file bus",
+		promptGuidelines: [
+			"After delegate, continue other work or wait for the pushed report — do not call agency_wait unless debugging",
+		],
 		parameters: Type.Object({
 			to: Type.String({ description: "Instance / bus name" }),
 			taskId: Type.String(),
@@ -223,7 +251,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.outputShape) args.push("--output-shape", params.outputShape);
 			if (params.stopRules) args.push("--stop-rules", params.stopRules);
 			if (params.payloadJson) args.push("--payload-json", params.payloadJson);
-			const r = await runCtl(packageRoot, projectRoot, args, signal);
+			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_delegate failed");
 			return textResult(JSON.parse(r.stdout));
 		},
@@ -233,13 +261,11 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		name: "agency_wait",
 		label: "Agency wait",
 		description:
-			"Orchestrator-only: poll hub inbox for a taskId until report/ask, timeout, or dead specialist pane. Retry same taskId after timeout/Esc; respawn only on pane_dead.",
-		promptSnippet: "Wait for an agency specialist report by taskId",
+			"LEGACY: poll hub inbox for a taskId. Prefer lifecycle bridge push/queue. Keep only for debugging or migration.",
+		promptSnippet: "Legacy wait for an agency specialist report by taskId",
 		promptGuidelines: [
-			"Call after agency_delegate with the same taskId",
-			"On timeout: call agency_wait again — do not respawn",
+			"Prefer lifecycle bridge delivery over agency_wait",
 			"On pane_dead: agency_list → release → spawn + delegate",
-			"On ask: reply then agency_wait again for report",
 		],
 		parameters: Type.Object({
 			taskId: Type.String({ description: "Same taskId used in agency_delegate" }),
@@ -255,7 +281,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.intervalSec != null) args.push("--interval", String(params.intervalSec));
 			if (params.autoDoneProgress === false) args.push("--no-auto-done-progress");
 			if (params.autoDoneProgress === true) args.push("--auto-done-progress");
-			const r = await runCtl(packageRoot, projectRoot, args, signal);
+			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_wait failed");
 			return textResult(JSON.parse(r.stdout));
 		},
@@ -278,7 +304,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.mode) args.push("--mode", params.mode);
 			if (params.keepPane) args.push("--keep-pane");
 			if (params.force) args.push("--force");
-			const r = await runCtl(packageRoot, projectRoot, args, signal);
+			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_release failed");
 			return textResult(JSON.parse(r.stdout));
 		},

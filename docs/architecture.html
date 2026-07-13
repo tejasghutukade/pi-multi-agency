@@ -510,6 +510,7 @@
       <a href="#skill-binding">Skill binding</a>
       <a href="#phase1">Phase 1 exit</a>
       <a href="#phase2">Phase 2</a>
+      <a href="#lifecycle-bridge">Lifecycle bridge</a>
       <a href="#lifecycle">Lifecycle</a>
       <a href="#memory">Memory</a>
       <a href="#comms">Comms</a>
@@ -596,6 +597,8 @@
           <li>Sub-agents inherit behavior from <strong>compound-engineering skills</strong>.</li>
           <li>Every sub-agent runs in its own <strong><a href="https://cmux.com/docs/getting-started" style="color: var(--peer);">cmux</a></strong> pane — one visible pi session per specialist.</li>
           <li>Inter-agent messaging: <strong>hybrid file bus + cmux notify</strong> (pi-intercom demoted after live-run friction).</li>
+          <li><strong>v0.3:</strong> pi lifecycle bridge frees the Orchestrator after delegate (no blocking <code>agency_wait</code>); push/queue specialist reports into hub chat.</li>
+          <li><strong>Hub lock:</strong> Orchestrator must not implement product work (tools + persona bans).</li>
           <li>Sub-agents may talk to each other under an <strong>explicit allowlist</strong>; all report back to the Orchestrator.</li>
           <li>The Orchestrator may <strong>relay or mediate</strong> between agents when needed.</li>
           <li>Agents can be <strong>temporary</strong> or <strong>persistent</strong> — Orchestrator decides per agent.</li>
@@ -952,11 +955,60 @@ sequenceDiagram
 
       <div class="panel" style="margin-top: 1rem;">
         <ul class="bullets">
-          <li><strong>C+D golden:</strong> Scout → Brainstorm (ask/reply) → Plan + reuse via <code>agency_*</code> tools.</li>
-          <li><strong>Async handoff:</strong> spawn → delegate → <code>agency_wait(taskId)</code> (retry wait on timeout/Esc; respawn only if pane dead).</li>
+          <li><strong>C+D golden:</strong> Scout → Brainstorm (ask/reply) → Plan + reuse via <code>agency_*</code> tools (used blocking <code>agency_wait</code> at the time).</li>
+          <li><strong>Async handoff (v0.3 target):</strong> spawn → delegate → <strong>lifecycle bridge</strong> (hub stays free). Blocking <code>agency_wait</code> is <strong>superseded</strong> — legacy/fallback only.</li>
+          <li><strong>Hub lock (v0.2):</strong> Orchestrator starts with read/search + <code>agency_*</code> only (no edit/write/bash); persona forbids solo implementation.</li>
           <li><strong>Boot smoke:</strong> scout claimed + reported after spawn without manual cmux paste (quoted <code>$(cat bootfile)</code>).</li>
-          <li><strong>Still soft / later:</strong> cmux session-restore resume hooks; peer ACL enforcement beyond hub mediation; optional <code>agency_run</code> sugar.</li>
+          <li><strong>Soft later:</strong> cmux session-restore; peer ACL beyond hub; stall-after-nudge-with-no-report timer.</li>
         </ul>
+      </div>
+    </section>
+
+    <section id="lifecycle-bridge">
+      <p class="sec-label">v0.3 · shipping</p>
+      <h2>Pi lifecycle bridge</h2>
+      <p style="color: var(--mute); margin-bottom: 1rem;">Implemented in <code>extensions/multi-agency/lifecycle.ts</code> + <code>agency/scripts/lifecycle_bridge.py</code>. Supersedes Orchestrator-blocking <code>agency_wait</code>. Full write-up: <code>architecture.md</code> § Pi lifecycle bridge.</p>
+
+      <div class="life-grid" style="margin-top: 0;">
+        <div class="life-card">
+          <div class="tag">Process truth</div>
+          <h3>pi agent_* events</h3>
+          <p><code>agent_start</code> → working · <code>agent_settled</code> → idle. Reliable per pane; extension hooks write <code>sessions.json</code>.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Task truth</div>
+          <h3>Bus report / ask</h3>
+          <p>Only a hybrid-bus <code>report</code>/<code>ask</code> for a <code>taskId</code> completes work to the Orchestrator. Settle ≠ done.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Silent settle</div>
+          <h3>One nudge → abandon</h3>
+          <p>Settled + no report → ~60s grace → <strong>one</strong> nudge. No <code>agent_start</code> after nudge → release + spawn + re-delegate same <code>taskId</code>.</p>
+        </div>
+        <div class="life-card">
+          <div class="tag">Hub delivery</div>
+          <h3>Push or queue</h3>
+          <p>Hub idle → <strong>push full message</strong> into Orchestrator chat. Hub working → <strong>queue + banner</strong>; deliver on hub <code>agent_settled</code>.</p>
+        </div>
+      </div>
+
+      <div class="mermaid" style="margin-top: 1rem;">
+sequenceDiagram
+    participant S as Specialist
+    participant E as Lifecycle bridge
+    participant Bus as File bus
+    participant O as Orchestrator
+    Note over S,O: spawn + delegate — hub stays free
+    S->>E: agent_start
+    S->>Bus: report
+    S->>E: agent_settled
+    alt hub idle
+        E->>O: push full report
+    else hub working
+        E->>O: footer queued
+        O->>E: agent_settled
+        E->>O: push queued report
+    end
       </div>
     </section>
 
@@ -1089,20 +1141,22 @@ flowchart TB
 sequenceDiagram
     actor U as You
     participant O as Orchestrator
+    participant Bridge as Lifecycle bridge
     participant S as Scout
     participant B as Brainstorm
     participant P as Plan
     U->>O: Explore auth options
-    Note over O: agency_spawn if needed
-    O->>S: agency_delegate + notify
-    O->>O: agency_wait(taskId)
-    S-->>O: report (or re-wait / respawn on dead)
+    O->>S: agency_spawn + agency_delegate
+    Note over O: hub stays free (no blocking wait)
+    S->>Bridge: agent_start / agent_settled
+    S-->>Bridge: bus report
+    Bridge->>O: push report (or queue if O working)
     O->>B: agency_delegate with scout paths
-    O->>O: agency_wait
-    B-->>O: requirements artifact + report
+    B-->>Bridge: bus report
+    Bridge->>O: push / queue
     O->>P: agency_delegate plan
-    O->>O: agency_wait
-    P-->>O: ready plan path + report
+    P-->>Bridge: bus report
+    Bridge->>O: push / queue
     O-->>U: synthesized answer
       </div>
     </section>
@@ -1110,7 +1164,7 @@ sequenceDiagram
     <section id="open">
       <p class="sec-label">Log</p>
       <h2>Decisions &amp; progress</h2>
-      <p style="color: var(--mute); margin-bottom: 1rem;">No blocking open items from the Phase 1/2 architecture backlog. Soft follow-ups listed at the bottom.</p>
+      <p style="color: var(--mute); margin-bottom: 1rem;">Blocking <code>agency_wait</code> handoff is superseded by the lifecycle bridge (shipped). Soft follow-ups below.</p>
       <ol class="open-list">
         <li><s>Sub-agent core</s> — A → B then C + D</li>
         <li><s>Spawn rules</s> — reuse idle, one Work writer, max 6 panes, naming, boot/teardown</li>
@@ -1130,11 +1184,14 @@ sequenceDiagram
         <li><s>Persistent memory</s> — <code>memory-spec.md</code> + NOTES + Work → docs/solutions</li>
         <li><s>Boot-nudge hardening</s> — <code>pi … "$(cat bootfile)"</code> + optional <code>--nudge</code></li>
         <li><s>Spawn capacity</s> — max 6; Plan may one temp twin; Work never twins</li>
-        <li><s>Async handoff</s> — spawn + delegate + wait (no one-shot run); <code>agency_wait</code> by <code>taskId</code></li>
+        <li><s>Async handoff (v0.2 wait)</s> — <strong>superseded (v0.3)</strong>: target is lifecycle bridge; <code>agency_wait</code> legacy only</li>
+        <li><s>Pi package distribution</s> — <code>pi install</code> + <code>agency_init</code> + vendored CE</li>
+        <li><s>Orchestrator hub lock</s> — persona bans + tools allowlist (no edit/write/bash)</li>
+        <li><s>Pi lifecycle bridge</s> — <strong>shipped (v0.3)</strong>: events for liveness; bus for task done; one nudge then abandon; hub push/queue</li>
       </ol>
       <div class="panel" style="margin-top: 1rem;">
         <ul class="bullets">
-          <li><strong>Soft later:</strong> cmux session-restore / <code>pi --session</code> resume after relaunch; peer ACL enforcement beyond hub mediation; boot-timing polish; optional <code>agency_run</code> sugar.</li>
+          <li><strong>Soft later:</strong> stall if nudge starts work but never reports; cmux session-restore; peer ACL beyond hub; drop <code>agency_wait</code> from hub tools after bridge proven in daily use; optional <code>agency_run</code> / RPC boot.</li>
         </ul>
       </div>
     </section>

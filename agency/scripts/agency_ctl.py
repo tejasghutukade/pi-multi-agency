@@ -19,6 +19,34 @@ from typing import Any
 
 HUB = "orchestrator"
 STARTING_TIMEOUT_SEC = 90
+# Hub process allowlist: read/search + agency_* — no edit/write/bash (see docs/architecture.md).
+HUB_TOOLS = (
+    "read,grep,find,ls,"
+    "agency_init,agency_list,agency_spawn,agency_delegate,agency_wait,agency_release"
+)
+
+
+def lifecycle_py() -> Path:
+    return scripts_dir() / "lifecycle_bridge.py"
+
+
+def lifecycle_run(args: list[str], timeout: float = 120) -> dict[str, Any]:
+    env = os.environ.copy()
+    env["AGENCY_ROOT"] = str(agency_root())
+    env["AGENCY_PROJECT_ROOT"] = str(project_root())
+    r = subprocess.run(
+        [sys.executable, str(lifecycle_py()), *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=env,
+        cwd=str(project_root()),
+    )
+    out = (r.stdout or "").strip()
+    if r.returncode != 0:
+        err = (r.stderr or "").strip() or out or "lifecycle_bridge failed"
+        raise RuntimeError(err)
+    return json.loads(out) if out else {"ok": True}
 
 
 def package_root() -> Path:
@@ -376,7 +404,13 @@ def ensure_orchestrator(root: Path) -> dict[str, Any]:
     return row
 
 
-def require_orchestrator(root: Path) -> dict[str, Any]:
+def require_orchestrator(root: Path, *, recovery: bool = False) -> dict[str, Any] | None:
+    if recovery:
+        data = load_sessions(root)
+        return next(
+            (i for i in (data.get("instances") or []) if i.get("role") == HUB or i.get("intercomName") == HUB),
+            None,
+        )
     return ensure_orchestrator(root)
 
 
@@ -514,7 +548,7 @@ def cmd_list(_args: argparse.Namespace) -> int:
 
 def cmd_spawn(args: argparse.Namespace) -> int:
     root = agency_root()
-    require_orchestrator(root)
+    require_orchestrator(root, recovery=bool(getattr(args, "recovery", False)))
     try:
         reconcile_cmux(root)
     except Exception:
@@ -704,7 +738,7 @@ def cmd_spawn(args: argparse.Namespace) -> int:
 
 def cmd_delegate(args: argparse.Namespace) -> int:
     root = agency_root()
-    require_orchestrator(root)
+    require_orchestrator(root, recovery=bool(getattr(args, "recovery", False)))
     data = load_sessions(root)
     inst = find_instance(data, args.to)
     if not inst:
@@ -733,6 +767,16 @@ def cmd_delegate(args: argparse.Namespace) -> int:
 
     inst["status"] = "working"
     inst["taskId"] = args.task_id
+    inst["nudgeCount"] = 0
+    inst["silentSettleAt"] = None
+    inst["awaitingStartAfterNudge"] = False
+    inst["lastDelegate"] = {
+        "taskId": args.task_id,
+        "workflowId": args.workflow_id,
+        "payload": payload,
+        "to": args.to,
+        "at": utc_now(),
+    }
     inst["updatedAt"] = utc_now()
     save_sessions(root, data)
 
@@ -848,8 +892,45 @@ def cmd_init(args: argparse.Namespace) -> int:
                 "copied": copied,
                 "next": [
                     "Open this project inside cmux",
-                    "pi --append-system-prompt .pi/agents/orchestrator.md",
-                    "/reload then claim orchestrator and agency_list",
+                    hub_start_command(proj),
+                    "/reload → /agency-claim → agency_list",
+                ],
+                "hubTools": HUB_TOOLS,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def hub_start_command(proj: Path | None = None) -> str:
+    """Canonical Orchestrator hub launch (persona + tools lock)."""
+    root = (proj or project_root()).resolve()
+    persona = root / ".pi" / "agents" / "orchestrator.md"
+    if not persona.is_file():
+        persona = package_root() / "agents" / "orchestrator.md"
+    return (
+        f"pi --approve --name {HUB} --tools {HUB_TOOLS} "
+        f"--append-system-prompt {persona}"
+    )
+
+
+def cmd_hub_start(args: argparse.Namespace) -> int:
+    proj = Path(args.project or Path.cwd()).resolve()
+    cmd = hub_start_command(proj)
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "action": "hub-start",
+                "projectRoot": str(proj),
+                "command": cmd,
+                "hubTools": HUB_TOOLS,
+                "notes": [
+                    "Run inside cmux from the project root",
+                    "Requires /agency-init once so .pi/agents/orchestrator.md exists",
+                    "Hub must not have edit/write/bash — specialists implement",
+                    "Then /reload → /agency-claim → agency_list",
                 ],
             },
             indent=2,
@@ -860,7 +941,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_release(args: argparse.Namespace) -> int:
     root = agency_root()
-    require_orchestrator(root)
+    require_orchestrator(root, recovery=bool(getattr(args, "recovery", False)))
     data = load_sessions(root)
     inst = find_instance(data, args.name)
     if not inst:
@@ -935,6 +1016,11 @@ def main() -> int:
         default=True,
         help="After boot-wait, send one fallback kick to start bus poll (default: true)",
     )
+    sp.add_argument(
+        "--recovery",
+        action="store_true",
+        help="Skip orchestrator surface gate (lifecycle abandon/respawn)",
+    )
 
     d = sub.add_parser("delegate", help="Send bus delegate envelope")
     d.add_argument("--to", required=True)
@@ -949,8 +1035,13 @@ def main() -> int:
     d.add_argument("--output-shape")
     d.add_argument("--stop-rules")
     d.add_argument("--payload-json")
+    d.add_argument(
+        "--recovery",
+        action="store_true",
+        help="Skip orchestrator surface gate (lifecycle abandon/respawn)",
+    )
 
-    w = sub.add_parser("wait", help="Wait for hub inbox report/ask for a taskId")
+    w = sub.add_parser("wait", help="Wait for hub inbox report/ask for a taskId (legacy)")
     w.add_argument("--task-id", required=True)
     w.add_argument("--timeout", type=float, default=120.0)
     w.add_argument("--interval", type=float, default=2.0)
@@ -966,6 +1057,7 @@ def main() -> int:
     r.add_argument("--mode", choices=["auto", "idle", "teardown"], default="auto")
     r.add_argument("--keep-pane", action="store_true")
     r.add_argument("--force", action="store_true")
+    r.add_argument("--recovery", action="store_true", help="Skip orchestrator surface gate")
 
     sub.add_parser("claim-orchestrator", help="Bind this cmux surface as orchestrator")
 
@@ -973,10 +1065,25 @@ def main() -> int:
     ini.add_argument("--project", help="Project root (default: cwd)")
     ini.add_argument("--force", action="store_true", help="Refresh templates even if already initialized")
 
+    hs = sub.add_parser(
+        "hub-start",
+        help="Print the canonical Orchestrator hub pi command (tools lock + persona)",
+    )
+    hs.add_argument("--project", help="Project root (default: cwd)")
+
+    lc = sub.add_parser("lifecycle", help="Pi lifecycle bridge (status / tick / delivery / abandon)")
+    lc.add_argument(
+        "lifecycle_args",
+        nargs=argparse.REMAINDER,
+        help="Args forwarded to lifecycle_bridge.py (e.g. whoami, status --status working)",
+    )
+
     args = p.parse_args()
     try:
         if args.cmd == "init":
             return cmd_init(args)
+        if args.cmd == "hub-start":
+            return cmd_hub_start(args)
         if args.cmd == "list":
             return cmd_list(args)
         if args.cmd == "spawn":
@@ -989,6 +1096,15 @@ def main() -> int:
             return cmd_release(args)
         if args.cmd == "claim-orchestrator":
             return cmd_claim_orchestrator(args)
+        if args.cmd == "lifecycle":
+            fwd = list(args.lifecycle_args or [])
+            if fwd and fwd[0] == "--":
+                fwd = fwd[1:]
+            if not fwd:
+                raise RuntimeError("lifecycle requires a subcommand (whoami|status|tick|…)")
+            out = lifecycle_run(fwd, timeout=180)
+            print(json.dumps(out, indent=2))
+            return 0
         raise RuntimeError(f"unknown cmd {args.cmd}")
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)

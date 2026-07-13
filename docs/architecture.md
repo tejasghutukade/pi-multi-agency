@@ -11,6 +11,8 @@ High-level design for a pi-based multi-agent system with an orchestrator and com
 - **Sub-agents** inherit behavior from compound-engineering skills (brainstorm, plan, work, debug, code review, doc review, scout).
 - **Every sub-agent runs in its own [cmux](https://cmux.com/docs/getting-started) pane** — a native macOS terminal workspace for managing multiple AI coding agents side by side.
 - **Inter-agent communication (revisiting):** Phase 1 used [pi-intercom](https://github.com/earendil-works/pi-intercom); live-run pain led us to **hybrid file bus + cmux notify** — see [Communication Transport](#communication-transport-revisiting).
+- **Completion path (v0.3):** [Pi lifecycle bridge](#pi-lifecycle-bridge-v03--shipping) — hub stays free after delegate; pi `agent_*` events for busy/idle; bus `report`/`ask` for task done; idle hub gets a **pushed** message, busy hub gets a **queued** banner. Blocking `agency_wait` is superseded.
+- **Hub lock (v0.2):** Orchestrator must not implement product work — tools allowlist + persona bans.
 - **Sub-agents** may talk to each other under explicit communication rules; all can report back to the Orchestrator.
 - The **Orchestrator** may relay or mediate between sub-agents when needed.
 - **Sub-agents** can be **temporary** (spin up for one task, then tear down) or **persistent** (stay alive across requests). The Orchestrator decides which mode to use per agent.
@@ -73,15 +75,16 @@ flowchart TB
     OrchPane -->|open pane + start pi| WorkPane
     OrchPane -->|open pane + start pi| OtherPanes
 
-    BrainPane <-->|pi-intercom| OrchPane
-    PlanPane <-->|pi-intercom| OrchPane
-    WorkPane <-->|pi-intercom| OrchPane
-    OtherPanes <-->|pi-intercom| OrchPane
+    OrchPane -->|hybrid file bus + notify| BrainPane
+    OrchPane -->|hybrid file bus + notify| PlanPane
+    OrchPane -->|hybrid file bus + notify| WorkPane
+    OrchPane -->|hybrid file bus + notify| OtherPanes
 
-    BrainPane <-->|pi-intercom peer| PlanPane
-    PlanPane <-->|pi-intercom peer| WorkPane
+    BrainPane <-->|peer ACL via bus later| PlanPane
+    PlanPane <-->|peer ACL via bus later| WorkPane
 ```
 
+> **Note:** An older draft of this diagram used pi-intercom edges. **Current transport is hybrid file bus + cmux notify**; pi-intercom is demoted. Lifecycle events (`agent_*`) are per-pane and bridged via the extension — see [Pi lifecycle bridge](#pi-lifecycle-bridge-v03--shipping).
 ### Why cmux
 
 [cmux](https://cmux.com/docs/getting-started) is a lightweight native macOS terminal (Ghostty-based) built for running multiple AI coding agents at once.
@@ -204,7 +207,9 @@ If step 5 times out: mark `failed`, close pane if possible, report to user. Do n
 
 Each `sessions.json` row should carry at least:
 
-`instanceId`, `role`, `intercomName`, `lifecycle` (`temporary` | `persistent`), `status` (`starting` | `idle` | `working` | `blocked` | `done` | `failed`), `cmuxSurfaceId?`, `piSessionId?`, `cwd`, `taskId?`, `createdAt`, `updatedAt`
+`instanceId`, `role`, `intercomName`, `lifecycle` (`temporary` | `persistent`), `status` (`starting` | `idle` | `working` | `blocked` | `interrupted` | `failed`), `cmuxSurfaceId?`, `piSessionId?`, `cwd`, `taskId?`, `nudgeCount?`, `createdAt`, `updatedAt`
+
+**v0.3 status source:** prefer pi lifecycle hooks (`agent_start` → `working`, `agent_settled` → `idle`) over only flipping status on `agency_delegate` / `agency_release`. `interrupted` / abandon paths set by the lifecycle bridge when nudge produces no `agent_start`.
 
 ## Sub-Agent Core Architecture
 
@@ -315,25 +320,114 @@ A small **multi-agency** pi extension replaces pi-subagents with a narrow tool s
 | `agency_spawn` | Open cmux pane, boot pi with persona, register instance |
 | `agency_list` | Connected specialists + manifest status (reconcile first) |
 | `agency_delegate` | Send structured delegation envelope via **hybrid file bus** |
-| `agency_wait` | Poll hub inbox for a `taskId` (`report` / `ask` / timeout / dead pane) |
 | `agency_release` | Tear down temp instance or mark persistent idle |
+| `agency_wait` | **Superseded (v0.3):** legacy poll helper only during migration — not the target handoff |
 
-**Async handoff (locked):** **spawn → delegate → wait** — three separate tools. No one-shot `agency_run`. Specialist work is async after delegate; Orchestrator blocks only inside `agency_wait` for that `taskId`.
+**Async handoff (v0.3 — shipping; supersedes blocking wait):** **spawn → delegate → free hub**. No one-shot `agency_run`. The Orchestrator does **not** block in `agency_wait` for completion. Delivery and liveness come from the [Pi lifecycle bridge](#pi-lifecycle-bridge-v03--shipping). Bus `report` / `ask` remain the **task** truth; pi `agent_*` events remain the **process** truth.
 
-| Situation | Recovery |
-|-----------|----------|
-| Specialist slow | Re-call `agency_wait` with the **same** `taskId` |
-| Esc / interrupt on Orchestrator mid-wait | Same — re-wait; do **not** respawn |
-| Specialist pane dead / error | `agency_list` reconcile → release → spawn + delegate again |
-| Bus `ask` during wait | Handle ask → reply → `agency_wait` again for `report` |
+| Situation | Recovery (v0.3) |
+|-----------|------------------------|
+| Specialist silent after settle, no bus report | Grace → **one** nudge → if no `agent_start`, abandon + respawn + re-delegate |
+| Specialist sends report while hub idle | **Push full message** into Orchestrator chat |
+| Specialist sends report while hub working | **Queue** + footer banner; deliver on hub `agent_settled` |
+| Esc / interrupt mid-work | `agent_settled` without report → same silent-settle path (nudge once) |
+| Pane dead | reconcile → release → spawn + re-delegate |
 
-**Implemented (v1):** `.pi/extensions/multi-agency/` + `.pi/agency/scripts/agency_ctl.py`. The extension owns cmux + `sessions.json`; messaging stays on `bus.py` + cmux notify (pi-intercom demoted). Orchestrator-only gate: caller cmux surface must match the claimed orchestrator row (`/agency-claim` or first spawn).
+**Historical (v0.2 / Phase 2 golden path):** Orchestrator blocked in `agency_wait(taskId)` and re-waited on timeout. That pattern is **retired** once the lifecycle bridge ships — keep `agency_wait` only as a manual fallback.
+
+### Orchestrator hub lock (v0.2)
+
+The hub freelances when it still has a full coding toolkit and only soft “prefer agency_*” guidance. **Locked mitigation (persona + tools):**
+
+| Layer | Rule |
+|-------|------|
+| **Persona** | `agents/orchestrator.md` + charter: hard bans — no edit/write of product code, no implement-and-fix loops, always spawn → delegate → (lifecycle delivery) for recon/plan/implement/review/debug |
+| **Tools** | Hub process allowlist: `read,grep,find,ls` + `agency_init,agency_list,agency_spawn,agency_delegate,agency_wait,agency_release` — **no** `edit` / `write` / `bash` (`agency_wait` may leave the allowlist after bridge lands) |
+| **Launch** | Canonical command from `agency_ctl.py hub-start` (also `/agency-hub`) |
+
+Plain `pi --append-system-prompt .pi/agents/orchestrator.md` without `--tools` is **non-compliant** and will drift into solo coding. Compaction does not remove the system prompt; the tools lock is what removes capability.
+
+**Implemented (v1 control plane):** package `extensions/multi-agency/` + `agency/scripts/agency_ctl.py`. The extension owns cmux + `sessions.json`; messaging stays on `bus.py` + cmux notify (pi-intercom demoted). Orchestrator-only gate: caller cmux surface must match the claimed orchestrator row (`/agency-claim` or first spawn). Project state after `agency_init` lives under `<project>/.pi/agency/` (scripts stay in the package).
+
+### Pi lifecycle bridge (v0.3 — shipping)
+
+**Status:** implemented in package `extensions/multi-agency/lifecycle.ts` + `agency/scripts/lifecycle_bridge.py` (`agency_ctl lifecycle …`). This **supersedes** Orchestrator-blocking `agency_wait` as the primary completion path.
+
+Pi exposes reliable per-process events (`agent_start`, `agent_end`, `agent_settled`, abort via stream `aborted`, `session_shutdown`). They are **local to each pi process** — a small extension hook in **every** agency pane (hub + specialists) must write shared state and drive delivery. Do **not** confuse process idle with task done.
+
+| Signal | Means | Use for |
+|--------|--------|---------|
+| `agent_start` | Process is working a turn | `sessions.json` → `working` |
+| `agent_end` | One low-level run finished (retry/queue may continue) | coarse; prefer `agent_settled` for idle |
+| `agent_settled` | Fully idle — no auto-retry / compact-retry / queued follow-up | `sessions.json` → `idle` |
+| Bus `report` / `ask` | Task outcome for a `taskId` | **Only** completion signal for the Orchestrator |
+| Esc / `aborted` then settle | Interrupted turn | Treat as silent settle if no report |
+
+**Truth split (locked):**
+
+- **Liveness / busy:** pi lifecycle events  
+- **Task done:** hybrid bus envelope (`report` / `ask`) for that `taskId`
+
+#### Specialist recovery after silent settle
+
+```
+delegate → expect agent_start (working)
+… work …
+agent_settled
+  ├─ bus report/ask already present → task complete (delivery layer runs)
+  └─ no report for this taskId
+       → grace ~60s
+       → if still no report: exactly **one** nudge to the specialist
+            ├─ agent_start observed → revived; keep waiting for bus report
+            └─ **no agent_start** within ~15–30s → abandon:
+                 release → spawn new → re-delegate **same** taskId
+                 wake hub (“specialist abandoned / respawned”)
+```
+
+If nudge produces `agent_start` but never a bus report, do **not** auto-abandon under this rule (soft later: second timer). Max **one** nudge per silent-settle episode.
+
+#### Hub delivery queue
+
+When a specialist bus `report`/`ask` is ready:
+
+| Hub state | Action |
+|-----------|--------|
+| Idle (`agent_settled`) | **Push the full message** into the Orchestrator session so it can act |
+| Working (`agent_start` … not settled) | **Do not interrupt** — enqueue + footer/banner: “Queued report from \<instance\> — delivers when idle” |
+
+On hub `agent_settled` (+ optional ~30s grace): dequeue and push next message; clear banner.
+
+Bus files stay the durable audit trail; push is **delivery UX**, not a second store of truth.
+
+```mermaid
+sequenceDiagram
+    participant S as Specialist pi
+    participant E as Lifecycle bridge
+    participant Bus as File bus
+    participant O as Orchestrator pi
+
+    Note over S,O: spawn + agency_delegate (hub stays free)
+    S->>E: agent_start
+    E->>E: sessions working
+    S->>Bus: report (taskId)
+    S->>E: agent_settled
+    alt hub idle
+        E->>O: push full report message
+    else hub working
+        E->>O: footer queued from specialist
+        O->>E: agent_settled
+        E->>O: push queued report
+    end
+```
+
+**Draft timers:** grace before nudge 60s; wait for `agent_start` after nudge 15–30s; hub deliver grace after settle ~30s.
 
 | Pros | Cons |
 |------|------|
 | Structured spawn/teardown; enforce ACL at delegate time | Extension code to write and maintain |
 | Orchestrator prompt stays high-level | Must handle cmux/pi boot failures cleanly |
 | Natural place for spawn rules later | |
+| Lifecycle bridge frees hub while specialists run | Cross-pane event bridge must be wired carefully |
 
 **Best when:** moving from prototype to something you run daily.
 
@@ -341,15 +435,18 @@ A small **multi-agency** pi extension replaces pi-subagents with a narrow tool s
 
 Each specialist is a **`.pi/agents/<role>.md`** file: frontmatter (`name`, `description`, `tools`) + short system prompt. CE skills stay **layered** (read via `skillPath` on delegate — not pasted into the agent body).
 
-**Implemented (v1):** `.pi/agents/{orchestrator,scout,brainstorm,plan}.md`. `agency_ctl spawn` starts:
+**Implemented (v1):** `.pi/agents/{orchestrator,scout,brainstorm,plan,…}.md`. `agency_ctl spawn` starts specialists with:
 
 `pi --approve --name <instance> --append-system-prompt .pi/agents/<role>.md [--tools …]`
 
+The **Orchestrator hub** is started by the human (not `agency_spawn`) with the locked tools allowlist — see [Orchestrator hub lock](#orchestrator-hub-lock-v02) and `agency_ctl hub-start`.
+
 ```
+.pi/agents/orchestrator.md → hub lock: read/search + agency_* only; hard no-implement bans
 .pi/agents/scout.md        → scout charter + bus loop (read-lean tools)
 .pi/agents/brainstorm.md   → points at ce-brainstorm skillPath
 .pi/agents/plan.md         → points at ce-plan skillPath
-agents.yaml                → agentPath + charterPath + ACL + lifecycle
+agents.yaml                → agentPath + charterPath + ACL + lifecycle + tools
 ```
 
 | Pros | Cons |
@@ -393,20 +490,20 @@ sequenceDiagram
     C->>S: pi boots with persona
     S->>S: /name plan
     S-->>R: ready
-    O->>S: intercom delegate packet
+    O->>S: bus delegate envelope + notify
     S->>S: run CE skill behavior
     alt blocked on decision
-        S->>O: intercom ask
-        O->>S: intercom reply
+        S->>O: bus ask
+        O->>S: bus reply
     end
-    S->>O: intercom ask or send result
+    S->>O: bus report (delivered via lifecycle bridge)
     opt temporary
         O->>R: release
         R->>C: close pane
     end
 ```
 
-**While working:** the specialist follows its CE skill, uses normal pi tools, and only talks outward through pi-intercom (peers allowed by ACL). It does not interpret user messages directly — the external user talks to the Orchestrator only.
+**While working:** the specialist follows its CE skill, uses normal pi tools, and only talks outward through the **hybrid file bus** (peers allowed by ACL in later phases). It does not interpret user messages directly — the external user talks to the Orchestrator only. Process busy/idle is observed via pi `agent_*` events (lifecycle bridge).
 
 **Inspiration from pi-subagents we keep:** compact task contracts, meaningful `/name`, Orchestrator as sole spawner, Work as single writer, escalate decisions upward instead of guessing.
 
@@ -765,7 +862,8 @@ Short answer: **no dedicated agent-to-agent mailbox.** cmux ([getting started](h
 1. Orchestrator writes `inbox/<specialist>/pending/…-delegate.json` (atomic).
 2. Orchestrator `cmux notify --title <specialist> --body "delegate <taskId>"`.
 3. Specialist polls, claims → `processing/`, works, writes artifact + `inbox/orchestrator/pending/…-report.json`.
-4. Specialist notifies Orchestrator; Orchestrator polls, synthesizes, continues.
+4. Lifecycle bridge sees report + hub idle/busy → **push** into Orchestrator chat or **queue + banner** (v0.3). Notify remains a secondary attention signal.
+5. Orchestrator synthesizes and continues (does not need to block in `agency_wait`).
 
 **pi-intercom:** optional/legacy; not required for Phase 1 exit once hybrid works.
 
@@ -856,18 +954,23 @@ If A needs info from B and A↛B is not allowed:
 sequenceDiagram
     actor U as You
     participant O as Orchestrator
+    participant Bridge as Lifecycle bridge
     participant S as Scout
     participant B as Brainstorm
     participant P as Plan
 
     U->>O: Explore auth options
-    Note over O: open cmux pane if needed
-    O->>S: write inbox + cmux notify (delegate)
-    S-->>O: artifact path + inbox report + notify
-    O->>B: write inbox + notify (scout paths)
-    B-->>O: requirements artifact + notify
-    O->>P: write inbox + notify (plan)
-    P-->>O: ready plan path + notify
+    O->>S: agency_spawn + agency_delegate
+    Note over O: hub stays free (no blocking wait)
+    S->>Bridge: agent_start / agent_settled
+    S-->>Bridge: bus report
+    Bridge->>O: push report (or queue if O working)
+    O->>B: agency_delegate with scout paths
+    B-->>Bridge: bus report
+    Bridge->>O: push / queue
+    O->>P: agency_delegate plan
+    P-->>Bridge: bus report
+    Bridge->>O: push / queue
     O-->>U: synthesized answer
 ```
 
@@ -893,8 +996,9 @@ sequenceDiagram
 18. ~~Option D agent files~~ — **done:** all seven roles under `.pi/agents/`
 19. ~~Boot-nudge hardening~~ — **done:** spawn starts `pi … "$(cat bootfile)"` so the first turn begins; optional `--nudge` fallback after boot-wait
 20. ~~Option C+D golden path~~ — **proven 2026-07-12:** Scout → Brainstorm → Plan reuse; artifacts `.pi/agency/artifacts/cd-golden-1/`
-21. ~~Async handoff API~~ — **decided:** spawn + delegate + wait (no `agency_run`); `agency_wait` filters hub inbox by `taskId`; retry wait on timeout/Esc; respawn only if pane dead
-
+21. ~~Async handoff API~~ — **superseded (v0.3):** was spawn + blocking `agency_wait`; **target** is spawn → delegate → **lifecycle bridge** delivery (hub stays free). `agency_wait` legacy/fallback only — see [Pi lifecycle bridge](#pi-lifecycle-bridge-v03--shipping)
 22. ~~Pi package distribution~~ — **done (v0.1):** `package.json` + `pi install`; `agency_init` scaffolds project state; CE skills vendored under `vendor/compound-engineering/`
+23. ~~Orchestrator hub lock~~ — **done (v0.2):** persona hard bans + `--tools` allowlist (no edit/write/bash); `agency_ctl hub-start` / `/agency-hub` — see [Orchestrator hub lock](#orchestrator-hub-lock-v02)
+24. ~~Pi lifecycle bridge~~ — **shipped (v0.3):** hook `agent_start` / `agent_settled`; bus = task truth; silent settle → one nudge → no `agent_start` = abandon+respawn; hub idle = push full message, hub busy = queue + banner — see [Pi lifecycle bridge](#pi-lifecycle-bridge-v03--shipping)
 
-**Soft later (not blocking):** cmux session-restore / `pi --session` resume; peer ACL enforcement beyond hub mediation; boot-timing polish; optional `agency_run` sugar later.
+**Soft later (not blocking):** stall timer if nudge starts work but never reports; cmux session-restore / `pi --session` resume; peer ACL enforcement beyond hub mediation; optional `agency_run` sugar; RPC/json runner for specialist boot (bus still durable envelopes). Drop `agency_wait` from hub tool allowlist after bridge is proven in daily use.
