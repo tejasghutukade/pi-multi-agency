@@ -17,6 +17,8 @@ from typing import Any
 SILENT_SETTLE_GRACE_SEC = 60
 NUDGE_START_WAIT_SEC = 25
 HUB_DELIVER_GRACE_SEC = 30
+# temporary specialist: idle after agent_settled → auto-close (Orchestrator need not release)
+TEMP_IDLE_TEARDOWN_SEC = 300
 
 HUB = "orchestrator"
 
@@ -107,6 +109,109 @@ def cmd_whoami(_args: argparse.Namespace) -> int:
                 "cmuxPane": pane,
                 "instance": inst,
                 "isHub": bool(inst and (inst.get("role") == HUB or inst.get("intercomName") == HUB)),
+                "isTemporary": bool(inst and inst.get("lifecycle") == "temporary"),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_idle_teardown(args: argparse.Namespace) -> int:
+    """Close a temporary specialist after prolonged idle (no hub involvement)."""
+    ctl = import_ctl()
+    root = ctl.agency_root()
+    data = ctl.load_sessions(root)
+    name = args.name
+    if not name:
+        surface, _ = ctl.caller_surface()
+        inst = find_by_surface(data, surface)
+        name = (inst or {}).get("intercomName")
+    if not name:
+        raise RuntimeError("could not resolve instance")
+    inst = ctl.find_instance(data, name)
+    if not inst:
+        raise RuntimeError(f"no instance {name}")
+    if inst.get("role") == HUB or inst.get("intercomName") == HUB:
+        raise RuntimeError("refusing to idle-teardown orchestrator")
+    if inst.get("lifecycle") != "temporary":
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "idle-teardown",
+                    "skipped": "not-temporary",
+                    "instance": name,
+                    "lifecycle": inst.get("lifecycle"),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if inst.get("status") == "working":
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "idle-teardown",
+                    "skipped": "still-working",
+                    "instance": name,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    ctl_path = Path(__file__).resolve().parent / "agency_ctl.py"
+    env = {
+        **os.environ,
+        "AGENCY_ROOT": str(root),
+        "AGENCY_PROJECT_ROOT": str(ctl.project_root()),
+    }
+    r = subprocess.run(
+        [
+            sys.executable,
+            str(ctl_path),
+            "release",
+            "--name",
+            str(name),
+            "--mode",
+            "teardown",
+            "--recovery",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        cwd=str(ctl.project_root()),
+    )
+    if r.returncode != 0:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "action": "idle-teardown",
+                    "error": (r.stderr or r.stdout or "release failed").strip(),
+                    "instance": name,
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        release_out = json.loads(r.stdout) if r.stdout.strip() else {"ok": True}
+    except json.JSONDecodeError:
+        release_out = {"raw": r.stdout}
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "action": "idle-teardown",
+                "reason": args.reason or "temp-idle-timeout",
+                "idleSec": args.idle_sec or TEMP_IDLE_TEARDOWN_SEC,
+                "instance": name,
+                "release": release_out,
             },
             indent=2,
         )
@@ -613,6 +718,14 @@ def main() -> int:
     ab.add_argument("--reason")
     ab.add_argument("--keep-pane", action="store_true")
 
+    itd = sub.add_parser(
+        "idle-teardown",
+        help="Teardown temporary specialist after prolonged idle (no Orchestrator action)",
+    )
+    itd.add_argument("--name")
+    itd.add_argument("--reason")
+    itd.add_argument("--idle-sec", type=float, default=TEMP_IDLE_TEARDOWN_SEC)
+
     args = p.parse_args()
     try:
         if args.cmd == "whoami":
@@ -629,6 +742,8 @@ def main() -> int:
             return cmd_tick(args)
         if args.cmd == "abandon":
             return cmd_abandon(args)
+        if args.cmd == "idle-teardown":
+            return cmd_idle_teardown(args)
         raise RuntimeError(f"unknown {args.cmd}")
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)

@@ -15,7 +15,7 @@ High-level design for a pi-based multi-agent system with an orchestrator and com
 - **Hub lock (v0.2):** Orchestrator must not implement product work — tools allowlist + persona bans.
 - **Sub-agents** may talk to each other under explicit communication rules; all can report back to the Orchestrator.
 - The **Orchestrator** may relay or mediate between sub-agents when needed.
-- **Sub-agents** can be **temporary** (spin up for one task, then tear down) or **persistent** (stay alive across requests). The Orchestrator decides which mode to use per agent.
+- **Sub-agents** can be **temporary** (spin up for one task, then tear down) or **persistent** (stay alive across requests). The Orchestrator decides which mode to use per agent. Temporary panes also **auto-close after 5 minutes idle** post-`agent_settled` (per-pane timer; hub need not release).
 
 ## Architecture Diagram
 
@@ -386,6 +386,18 @@ agent_settled
 
 If nudge produces `agent_start` but never a bus report, do **not** auto-abandon under this rule (soft later: second timer). Max **one** nudge per silent-settle episode.
 
+#### Temporary idle auto-close (per pane)
+
+Each **temporary** specialist runs its own timer in its pane extension (Orchestrator does not release):
+
+```
+agent_settled  → arm / reset 5-minute idle timer
+agent_start    → cancel timer (working again)
+5 minutes idle → lifecycle idle-teardown → cmux close-surface + clear sessions row
+```
+
+Persistent specialists are never auto-closed by this rule. Hub is never auto-closed.
+
 #### Hub delivery queue
 
 When a specialist bus `report`/`ask` is ready:
@@ -420,7 +432,7 @@ sequenceDiagram
     end
 ```
 
-**Draft timers:** grace before nudge 60s; wait for `agent_start` after nudge 15–30s; hub deliver grace after settle ~30s.
+**Draft timers:** grace before nudge 60s; wait for `agent_start` after nudge 15–30s; hub deliver grace after settle ~30s; temporary idle auto-close **5 minutes** after last `agent_settled`.
 
 | Pros | Cons |
 |------|------|
@@ -793,7 +805,8 @@ Overrides: delegation packet or user instruction wins over `lifecycleDefault`.
 | Temp agent asked a second related task in the same workflow | **Promote** → `lifecycle: persistent` (rename to role id if free) |
 | Persistent idle > idle TTL (Phase 1: manual; later: e.g. end of day / user “release all”) | **Release** optional |
 | Workflow complete / user “done” / golden path finished and no follow-ups | **Release** all persistents spawned for that workflow (or keep if user wants a standing desk) |
-| Temp task complete or failed | **Always tear down** |
+| Temp task complete or failed | Prefer tear down; if the Orchestrator does not release, the pane auto-closes after **5 minutes idle** post-`agent_settled` |
+| Temporary idle ≥ 5 minutes (`agent_settled`, no new `agent_start`) | **Lifecycle bridge auto-teardown** (per-pane timer; no hub action) |
 | Promote refused (role name taken by another persistent) | Keep `role-t*` name with `lifecycle: persistent` |
 
 ### Phase 1 practice
@@ -1000,5 +1013,6 @@ sequenceDiagram
 22. ~~Pi package distribution~~ — **done (v0.1):** `package.json` + `pi install`; `agency_init` scaffolds project state; CE skills vendored under `vendor/compound-engineering/`
 23. ~~Orchestrator hub lock~~ — **done (v0.2):** persona hard bans + `--tools` allowlist (no edit/write/bash); `agency_ctl hub-start` / `/agency-hub` — see [Orchestrator hub lock](#orchestrator-hub-lock-v02)
 24. ~~Pi lifecycle bridge~~ — **shipped (v0.3):** hook `agent_start` / `agent_settled`; bus = task truth; silent settle → one nudge → no `agent_start` = abandon+respawn; hub idle = push full message, hub busy = queue + banner — see [Pi lifecycle bridge](#pi-lifecycle-bridge-v03--shipping)
+25. ~~Temporary idle auto-close~~ — **shipped:** each temp pane arms a 5m timer on `agent_settled`, cancels on `agent_start`, then `lifecycle idle-teardown` without Orchestrator — see [Temporary idle auto-close](#temporary-idle-auto-close-per-pane)
 
 **Soft later (not blocking):** stall timer if nudge starts work but never reports; cmux session-restore / `pi --session` resume; peer ACL enforcement beyond hub mediation; optional `agency_run` sugar; RPC/json runner for specialist boot (bus still durable envelopes). Drop `agency_wait` from hub tool allowlist after bridge is proven in daily use.

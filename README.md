@@ -108,6 +108,7 @@ docs/                      # architecture board
 
 - **Hub lock:** Orchestrator starts with read/search + `agency_*` only (no edit/write/bash); persona forbids solo implementation
 - **Lifecycle bridge:** `agent_start`/`agent_settled` update status; silent settle → one nudge → abandon/respawn; hub idle → push report, hub busy → queue banner
+- **Temp auto-close:** temporary specialists arm a **5-minute** idle timer on `agent_settled` (cancel on `agent_start`); Orchestrator need not release them
 - **Sole-writer:** only one Work instance on the project checkout
 - Max **6** specialist panes; Plan may get one temp twin; Work never twins
 - Async handoff: **spawn → delegate → free hub** (`agency_wait` is legacy)
