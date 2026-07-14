@@ -25,13 +25,15 @@ Filesystem envelopes for content; cmux notify for attention. Specialists **poll*
 
 ## Scripts location
 
-`bus.py` / `memory.py` / `agency_ctl.py` live in the **installed multi-agency package** (`…/agency/scripts/`), **not** under `.pi/agency/scripts/`. Project `.pi/agency/` holds state (inbox, sessions, charters copy). Boot prompts pass the absolute package `bus.py` path — use that as `$BUS`.
+`bus.py` / `memory.py` / `agency_ctl.py` live in the **installed multi-agency package** (`…/agency/scripts/`), **not** under `.pi/agency/scripts/`. Project `.pi/agency/` holds state (inbox, sessions, charters copy). Boot prompts pass absolute package script paths — use `$BUS` and `$MEMORY`.
 
 ```bash
 export AGENCY_ROOT="$PWD/.pi/agency"
 export AGENCY_PROJECT_ROOT="$PWD"
-BUS="python3 /path/to/multi-agency/agency/scripts/bus.py"
-# or: absolute path printed in specialist boot / /agency-hub
+export BUS="/path/to/multi-agency/agency/scripts/bus.py"
+export MEMORY="/path/to/multi-agency/agency/scripts/memory.py"
+# or: absolute paths printed in specialist boot / /agency-hub
+python3 "$BUS" recv --as <instanceName> --wait 60 --interval 2
 ```
 
 ## Envelope schema

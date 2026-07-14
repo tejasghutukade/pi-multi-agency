@@ -69,11 +69,15 @@ def bootstrap_text(
     skill_disp = str(skill_resolved) if skill_resolved else skill
     skill_line = f"On each delegate, also read skillPath: {skill_disp}." if skill_disp else ""
     bus = str(scripts_dir() / "bus.py")
+    memory = str(scripts_dir() / "memory.py")
     return (
         f"{persona} {skill_line} "
         f"Your bus instance name is {instance_name}. "
-        f'export AGENCY_ROOT="{agency_export}". '
-        f"Immediately run: python3 {bus} recv --as {instance_name} --wait 60 --interval 2 "
+        f'export AGENCY_ROOT="{agency_export}"; '
+        f'export BUS="{bus}"; '
+        f'export MEMORY="{memory}"; '
+        "Use only $BUS/$MEMORY for agency scripts; never call .pi/agency/scripts/… directly. "
+        f"Immediately run: python3 \"$BUS\" recv --as {instance_name} --wait 60 --interval 2 "
         "and process any pending delegate (report/ask to orchestrator, then bus done). "
         "Do not wait for another human message. Do not talk to the end user."
     )
@@ -259,10 +263,14 @@ def spawn_specialist(
     if nudge and boot_wait > 0:
         time.sleep(boot_wait)
         bus = str(scripts_dir() / "bus.py")
+        memory = str(scripts_dir() / "memory.py")
         nudge_body = (
-            f"If idle: export AGENCY_ROOT={agency_export}; "
-            f"python3 {bus} recv --as {instance_name} "
-            f"--wait 60 --interval 2; process any delegate now."
+            f'If idle: export AGENCY_ROOT="{agency_export}"; '
+            f'export BUS="{bus}"; '
+            f'export MEMORY="{memory}"; '
+            f'python3 "$BUS" recv --as {instance_name} '
+            f"--wait 60 --interval 2; process any delegate now. "
+            "Use only $BUS/$MEMORY for agency scripts."
         )
         try:
             send_to_surface(surface, nudge_body)

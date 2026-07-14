@@ -78,6 +78,41 @@ def test_dry_run_creates_idle_row(spawn_env: Path):
     assert len(data["instances"]) == 1
 
 
+def test_bootstrap_exports_package_script_paths(spawn_env: Path):
+    text = asp.bootstrap_text(
+        "work",
+        None,
+        ".pi/agency/charters/work.md",
+        None,
+        str(spawn_env),
+    )
+    assert f'export AGENCY_ROOT="{spawn_env}"' in text
+    assert f'export BUS="{asp.scripts_dir() / "bus.py"}"' in text
+    assert f'export MEMORY="{asp.scripts_dir() / "memory.py"}"' in text
+    assert 'python3 "$BUS" recv --as work --wait 60 --interval 2' in text
+    assert "Use only $BUS/$MEMORY" in text
+    assert "never call .pi/agency/scripts" in text
+
+
+def test_packaged_prompts_do_not_recommend_project_script_paths():
+    repo = Path(__file__).resolve().parents[3]
+    offenders = []
+    needles = (
+        "python3 .pi/agency/scripts/",
+        'BUS="python3 .pi/agency/scripts/',
+        'CTL="python3 .pi/agency/scripts/',
+    )
+    for base in (repo / "agency", repo / "agents"):
+        for path in base.rglob("*"):
+            if "scripts/tests" in path.as_posix():
+                continue
+            if path.is_file() and path.suffix in {".md", ".py", ".sh"}:
+                text = path.read_text(errors="ignore")
+                if any(needle in text for needle in needles):
+                    offenders.append(str(path.relative_to(repo)))
+    assert offenders == []
+
+
 def test_dual_entry_same_function():
     import specialist_spawn as ss
 

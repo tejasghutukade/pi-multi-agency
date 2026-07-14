@@ -41,9 +41,9 @@ Init helper (package scripts — never `.pi/agency/scripts/…`; use absolute pa
 
 ```bash
 export AGENCY_ROOT="$PWD/.pi/agency"
+export MEMORY="/path/to/multi-agency/agency/scripts/memory.py"  # boot prompt provides this
 python3 "$MEMORY" init --as plan --role plan
 python3 "$MEMORY" path --as plan
-# MEMORY=…/multi-agency/agency/scripts/memory.py
 ```
 
 ## docs/solutions integration
