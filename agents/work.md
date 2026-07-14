@@ -25,12 +25,21 @@ Bus: `.pi/agency/bus-spec.md`
 
 ## Bus loop
 
+Scripts live in the **multi-agency package** (`…/agency/scripts/`), not under `.pi/agency/scripts/`. Use `$BUS` / `$MEMORY` from your boot prompt (absolute package paths).
+
 ```bash
-export AGENCY_ROOT="$PWD/.pi/agency"
-python3 .pi/agency/scripts/bus.py recv --as <instanceName> --wait 60 --interval 2
+export AGENCY_ROOT="<project>/.pi/agency"
+python3 "$BUS" recv --as <instanceName> --wait 60 --interval 2
 ```
 
-On `delegate`: follow ce-work; `bus send --type report --to orchestrator`; `bus done`. No pi-intercom for agency traffic.
+On `delegate`: follow ce-work; then:
+
+```bash
+python3 "$BUS" send --from <instanceName> --to orchestrator --type report --task-id <taskId> --payload-json '…'
+python3 "$BUS" done --as <instanceName> --path <processing-file>
+```
+
+Always report before idle. No pi-intercom for agency traffic.
 
 ## Output shape
 

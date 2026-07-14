@@ -990,6 +990,11 @@ sequenceDiagram
           <h3>Push or queue</h3>
           <p>Hub idle → <strong>push full message</strong> into Orchestrator chat. Hub working → <strong>queue + banner</strong>; deliver on hub <code>agent_settled</code>.</p>
         </div>
+        <div class="life-card">
+          <div class="tag">Temp idle</div>
+          <h3>5m auto-close</h3>
+          <p>Each temporary pane: <code>agent_settled</code> starts / resets a 5-minute timer; <code>agent_start</code> cancels it; idle timeout → teardown without Orchestrator.</p>
+        </div>
       </div>
 
       <div class="mermaid" style="margin-top: 1rem;">
@@ -1188,6 +1193,7 @@ sequenceDiagram
         <li><s>Pi package distribution</s> — <code>pi install</code> + <code>agency_init</code> + vendored CE</li>
         <li><s>Orchestrator hub lock</s> — persona bans + tools allowlist (no edit/write/bash)</li>
         <li><s>Pi lifecycle bridge</s> — <strong>shipped (v0.3)</strong>: events for liveness; bus for task done; one nudge then abandon; hub push/queue</li>
+        <li><s>Temp idle auto-close</s> — <strong>shipped</strong>: 5m idle after <code>agent_settled</code> on temporary panes → auto-teardown (per-pane timer)</li>
       </ol>
       <div class="panel" style="margin-top: 1rem;">
         <ul class="bullets">

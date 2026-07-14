@@ -10,11 +10,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from cmux_pane import tree_text  # noqa: E402
+from ledger import load_sessions, save_sessions  # noqa: E402
 
 
 def agency_root() -> Path:
@@ -24,38 +29,8 @@ def agency_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def load_sessions(path: Path) -> dict:
-    if not path.exists():
-        return {"version": 1, "instances": []}
-    return json.loads(path.read_text())
-
-
-def save_sessions(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n")
-
-
 def cmux_tree_text() -> str:
-    cmux = shutil.which("cmux")
-    if not cmux:
-        for c in (
-            Path.home() / "bin" / "cmux",
-            Path("/Applications/cmux.app/Contents/Resources/bin/cmux"),
-        ):
-            if c.exists():
-                cmux = str(c)
-                break
-    if not cmux:
-        return ""
-    try:
-        r = subprocess.run(
-            [cmux, "tree", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return (r.stdout or "") + (r.stderr or "")
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+    return tree_text(all_surfaces=True, timeout=5)
 
 
 def main() -> int:
@@ -75,8 +50,7 @@ def main() -> int:
     args = p.parse_args()
 
     root = agency_root()
-    path = root / "sessions.json"
-    data = load_sessions(path)
+    data = load_sessions(root)
     instances = list(data.get("instances") or [])
     force = set(args.force_stale)
     tree = cmux_tree_text() if args.check_cmux else ""
@@ -119,7 +93,7 @@ def main() -> int:
 
     if not args.dry_run:
         data["instances"] = kept
-        save_sessions(path, data)
+        save_sessions(root, data)
 
     print(json.dumps(result, indent=2))
     return 0

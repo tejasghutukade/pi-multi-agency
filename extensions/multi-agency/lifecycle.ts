@@ -4,6 +4,7 @@
  * Task truth: bus report/ask
  * Hub: push full message when idle; queue banner when busy
  * Specialist: silent settle → one nudge → abandon if no agent_start
+ * Temporary: agent_settled starts 5m idle timer; agent_start cancels; idle → auto-teardown
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -16,11 +17,18 @@ export type CtlRunner = (
 const SILENT_TICK_MS = 5_000;
 const HUB_POLL_MS = 2_000;
 const HUB_DELIVER_GRACE_MS = 30_000;
+const TEMP_IDLE_TEARDOWN_MS = 5 * 60 * 1000;
 
 type Whoami = {
 	ok?: boolean;
 	isHub?: boolean;
-	instance?: { intercomName?: string; role?: string; taskId?: string | null } | null;
+	isTemporary?: boolean;
+	instance?: {
+		intercomName?: string;
+		role?: string;
+		taskId?: string | null;
+		lifecycle?: string;
+	} | null;
 };
 
 type PendingHub = {
@@ -56,15 +64,24 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 	let identity: Whoami | null = null;
 	let processBusy = false;
 	let settleTimer: ReturnType<typeof setTimeout> | null = null;
+	let tempIdleTimer: ReturnType<typeof setTimeout> | null = null;
 	let hubPollTimer: ReturnType<typeof setInterval> | null = null;
 	let specialistTickTimer: ReturnType<typeof setInterval> | null = null;
 	let delivering = false;
+	let tearingDown = false;
 	let lastUi: ExtensionContext["ui"] | null = null;
 
 	const clearSettleTimer = () => {
 		if (settleTimer) {
 			clearTimeout(settleTimer);
 			settleTimer = null;
+		}
+	};
+
+	const clearTempIdleTimer = () => {
+		if (tempIdleTimer) {
+			clearTimeout(tempIdleTimer);
+			tempIdleTimer = null;
 		}
 	};
 
@@ -86,6 +103,12 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		return identity;
 	};
 
+	const isTemporary = () =>
+		Boolean(
+			identity?.isTemporary ||
+				identity?.instance?.lifecycle === "temporary",
+		);
+
 	const setQueueBanner = (ui: ExtensionContext["ui"] | null, pending: PendingHub | null) => {
 		if (!ui?.setStatus) return;
 		const n = pending?.count || 0;
@@ -102,6 +125,19 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		);
 	};
 
+	const setTempIdleBanner = (active: boolean) => {
+		if (!lastUi?.setStatus) return;
+		if (!active || !isTemporary()) {
+			lastUi.setStatus("agency-temp-idle", undefined);
+			return;
+		}
+		const name = identity?.instance?.intercomName || "specialist";
+		lastUi.setStatus(
+			"agency-temp-idle",
+			`Temporary ${name}: idle — auto-close in 5m if no agent_start`,
+		);
+	};
+
 	const markStatus = async (status: "working" | "idle" | "interrupted") => {
 		const name = identity?.instance?.intercomName;
 		const args = ["status", "--status", status];
@@ -111,6 +147,40 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		} catch {
 			/* pane may not be claimed yet */
 		}
+	};
+
+	const runTempIdleTeardown = async () => {
+		if (tearingDown || identity?.isHub || !isTemporary()) return;
+		tearingDown = true;
+		clearTempIdleTimer();
+		setTempIdleBanner(false);
+		const name = identity?.instance?.intercomName;
+		try {
+			const args = ["idle-teardown", "--reason", "temp-idle-timeout"];
+			if (name) args.push("--name", name);
+			await lifecycle(args);
+			lastUi?.notify?.(
+				`Temporary ${name || "specialist"} closed after 5m idle`,
+				"info",
+			);
+		} catch (e) {
+			tearingDown = false;
+			lastUi?.notify?.(`temp idle-teardown failed: ${String(e)}`, "error");
+		}
+	};
+
+	const armTempIdleTimer = () => {
+		if (identity?.isHub || !isTemporary() || tearingDown) {
+			clearTempIdleTimer();
+			setTempIdleBanner(false);
+			return;
+		}
+		clearTempIdleTimer();
+		setTempIdleBanner(true);
+		tempIdleTimer = setTimeout(() => {
+			tempIdleTimer = null;
+			void runTempIdleTeardown();
+		}, TEMP_IDLE_TEARDOWN_MS);
 	};
 
 	const drainHubQueue = async () => {
@@ -156,12 +226,14 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 
 	const specialistTick = async () => {
 		if (identity?.isHub) return;
-		if (processBusy) return;
+		if (processBusy || tearingDown) return;
 		const name = identity?.instance?.intercomName;
 		if (!name) return;
 		try {
 			const tick = (await lifecycle(["tick", "--name", name])) as TickResult;
 			if (tick.status === "abandon") {
+				clearTempIdleTimer();
+				setTempIdleBanner(false);
 				await lifecycle([
 					"abandon",
 					"--name",
@@ -201,17 +273,21 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 
 	pi.on("session_shutdown", async () => {
 		clearSettleTimer();
+		clearTempIdleTimer();
 		if (hubPollTimer) clearInterval(hubPollTimer);
 		if (specialistTickTimer) clearInterval(specialistTickTimer);
 		hubPollTimer = null;
 		specialistTickTimer = null;
 		lastUi?.setStatus?.("agency-queue", undefined);
+		lastUi?.setStatus?.("agency-temp-idle", undefined);
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
 		lastUi = ctx.ui;
 		processBusy = true;
 		clearSettleTimer();
+		clearTempIdleTimer();
+		setTempIdleBanner(false);
 		if (!identity?.instance) await refreshIdentity();
 		await markStatus("working");
 		if (identity?.isHub) void pollHubPending();
@@ -230,6 +306,7 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 			}, HUB_DELIVER_GRACE_MS);
 			void pollHubPending();
 		} else {
+			armTempIdleTimer();
 			void specialistTick();
 		}
 	});

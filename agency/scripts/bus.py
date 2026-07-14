@@ -15,16 +15,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from agency_paths import agency_root as paths_agency_root  # noqa: E402
+from catalog import load_agents, role_of  # noqa: E402
+from catalog import HUB as CATALOG_HUB  # noqa: E402
+
 TYPES = ("delegate", "report", "ask", "reply", "progress", "release")
 HUB = "orchestrator"
+assert CATALOG_HUB == HUB
 
 
 def agency_root() -> Path:
     env = os.environ.get("AGENCY_ROOT")
     if env:
         return Path(env).resolve()
-    here = Path(__file__).resolve().parent.parent
-    return here
+    # Prefer project AGENCY_ROOT semantics when available; kit fallback for bus CLI alone.
+    root = paths_agency_root()
+    return root
 
 
 def utc_now() -> datetime:
@@ -48,39 +58,7 @@ def ensure_inbox(root: Path, name: str) -> Path:
 
 
 def load_agents_yaml(root: Path) -> dict[str, Any]:
-    path = root / "agents.yaml"
-    if not path.exists():
-        return {}
-    try:
-        import yaml  # type: ignore
-    except ImportError:
-        return _parse_peers_fallback(path.read_text())
-    data = yaml.safe_load(path.read_text()) or {}
-    return data if isinstance(data, dict) else {}
-
-
-def _parse_peers_fallback(text: str) -> dict[str, Any]:
-    agents: dict[str, Any] = {"agents": {}}
-    current = None
-    for line in text.splitlines():
-        if line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":"):
-            current = line.strip().rstrip(":")
-            agents["agents"][current] = {"peers": []}
-        elif current and "peers:" in line:
-            rest = line.split("peers:", 1)[1].strip()
-            if rest.startswith("[") and rest.endswith("]"):
-                inner = rest[1:-1].strip()
-                peers = [p.strip() for p in inner.split(",") if p.strip()]
-                agents["agents"][current]["peers"] = peers
-    return agents
-
-
-def role_of(instance: str) -> str:
-    if instance == HUB:
-        return HUB
-    if "-t" in instance:
-        return instance.split("-t", 1)[0]
-    return instance
+    return load_agents(root)
 
 
 def acl_allows(root: Path, frm: str, to: str, phase1_hub_only: bool = True) -> bool:
@@ -95,6 +73,10 @@ def acl_allows(root: Path, frm: str, to: str, phase1_hub_only: bool = True) -> b
 
 
 def cmux_notify(title: str, body: str) -> bool:
+    return _notify(title, body)
+
+
+def _default_cmux_notify(title: str, body: str) -> bool:
     cmux = shutil.which("cmux")
     if not cmux:
         home_bin = Path.home() / "bin" / "cmux"
@@ -112,6 +94,15 @@ def cmux_notify(title: str, body: str) -> bool:
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+_notify = _default_cmux_notify
+
+
+def set_notify(fn) -> None:
+    """Override notify side-effect (tests). Pass None to restore default."""
+    global _notify
+    _notify = fn if fn is not None else _default_cmux_notify
 
 
 def cmd_send(args: argparse.Namespace) -> int:
@@ -184,6 +175,18 @@ def cmd_send(args: argparse.Namespace) -> int:
     out = root / "outbox" / f"{msg_id}.json"
     out.write_text(json.dumps(env, indent=2) + "\n")
 
+    from agency_events import emit
+
+    emit(
+        "bus.sent",
+        root=root,
+        instance=args.to,
+        taskId=args.task_id,
+        envelopeType=args.type,
+        fromName=args.from_name,
+        path=str(final),
+    )
+
     notified = False
     if not args.no_notify:
         notified = cmux_notify(notify_title, notify_body)
@@ -213,12 +216,36 @@ def claim_pending(root: Path, name: str, src: Path) -> tuple[Path, dict]:
     processing = root / "inbox" / name / "processing" / src.name
     src.replace(processing)
     data = json.loads(processing.read_text())
+    from agency_events import emit
+
+    emit(
+        "bus.claimed",
+        root=root,
+        instance=name,
+        taskId=data.get("taskId"),
+        envelopeType=data.get("type"),
+        path=str(processing),
+    )
     return processing, data
 
 
 def move_to_done(root: Path, name: str, path: Path) -> Path:
     dest = root / "inbox" / name / "done" / path.name
     path.replace(dest)
+    try:
+        data = json.loads(dest.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    from agency_events import emit
+
+    emit(
+        "bus.done",
+        root=root,
+        instance=name,
+        taskId=data.get("taskId"),
+        envelopeType=data.get("type"),
+        path=str(dest),
+    )
     return dest
 
 

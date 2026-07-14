@@ -91,30 +91,44 @@ python3 /path/to/multi-agency/agency/scripts/agency_ctl.py claim-orchestrator
 python3 /path/to/multi-agency/agency/scripts/agency_ctl.py spawn --role scout --lifecycle temporary
 ```
 
+### Ops observer
+
+Live roster / bus / timeline UI (localhost). Files under `.pi/agency` are truth; optional emit timeline needs `AGENCY_EVENTS=1`. Claim is a hub badge, not a gate to open the UI.
+
+```bash
+export AGENCY_ROOT="$PWD/.pi/agency"
+export AGENCY_EVENTS=1   # optional — timeline emit
+python3 /path/to/multi-agency/agency/scripts/agency_ctl.py observe
+# → http://127.0.0.1:8765/
+```
+
 ## Layout
 
 ```
 extensions/multi-agency/   # agency_* tools, lifecycle bridge, /agency-init|/agency-claim|/agency-hub
 skills/                    # agency-orchestrator, scout (pi-discovered)
-agency/                    # kit: scripts (incl. lifecycle_bridge.py), charters, agents.yaml, specs
+agency/scripts/            # layered control plane (ledger, bus, cmux_pane, recovery, observe, …)
+agency/observe/static/     # localhost ops UI served by agency_ctl observe
 agents/                    # persona templates (--append-system-prompt)
 vendor/compound-engineering/  # vendored CE skills (MIT, Every)
-docs/                      # architecture board
+docs/                      # architecture board + plans
 ```
 
-**Per project (created by init):** `.pi/agency/` (sessions, inbox, charters copy) and `.pi/agents/`. Runtime state stays under `.pi/` (gitignored). Package scripts stay in the installed multi-agency package — not copied into `.pi/agency/scripts/`.
+**Per project (created by init):** `.pi/agency/` (sessions, inbox, optional `events.jsonl`, charters copy) and `.pi/agents/`. Runtime state stays under `.pi/` (gitignored). Package scripts stay in the installed multi-agency package — not copied into `.pi/agency/scripts/`.
 
 ## Policy highlights (v0.3)
 
 - **Hub lock:** Orchestrator starts with read/search + `agency_*` only (no edit/write/bash); persona forbids solo implementation
 - **Lifecycle bridge:** `agent_start`/`agent_settled` update status; silent settle → one nudge → abandon/respawn; hub idle → push report, hub busy → queue banner
+- **Temp auto-close:** temporary specialists arm a **5-minute** idle timer on `agent_settled` (cancel on `agent_start`); Orchestrator need not release them
+- **Ops observer:** `agency_ctl observe` — roster / bus / timeline; claim is a badge, not a gate
 - **Sole-writer:** only one Work instance on the project checkout
 - Max **6** specialist panes; Plan may get one temp twin; Work never twins
 - Async handoff: **spawn → delegate → free hub** (`agency_wait` is legacy)
 
 ## Security
 
-- Do not commit `.pi/agency/inbox`, `outbox`, `artifacts`, or live `sessions.json`
+- Do not commit `.pi/agency/inbox`, `outbox`, `artifacts`, live `sessions.json`, or `events.jsonl`
 - Review [SECURITY.md](./SECURITY.md)
 - Vendored CE skills: see [vendor/compound-engineering/NOTICE](./vendor/compound-engineering/NOTICE)
 
