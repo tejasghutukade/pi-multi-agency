@@ -23,6 +23,17 @@ agents:
     tools: read-only
     # Optional: agency_ctl spawn --role scout --cwd <reference-repo> for mode reference-repo
 
+  researcher:
+    charterPath: .pi/agency/charters/researcher.md
+    agentPath: .pi/agents/researcher.md
+    # No skillPath: research uses built-in web_search / fetch_content
+    binding: layered
+    intercomName: researcher
+    lifecycleDefault: temporary
+    peers: [brainstorm, plan, scout]
+    # Read-only research: web + read/search tools, no write/edit/bash
+    tools: read,grep,find,ls,web_search,fetch_content,agency_report,agency_ask,agency_progress
+
   brainstorm:
     charterPath: .pi/agency/charters/brainstorm.md
     agentPath: .pi/agents/brainstorm.md
