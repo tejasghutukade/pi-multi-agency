@@ -1,6 +1,6 @@
 # Hybrid Message Bus Spec (v0)
 
-Filesystem envelopes for content; cmux notify for attention. Phase 1 delivery notice: **poll**.
+Filesystem envelopes for content; cmux notify for attention. Specialists **poll** their inbox. Hub completion UX is the **lifecycle bridge** (push/queue into the Orchestrator chat) — not blocking `agency_wait`.
 
 ## Layout
 
@@ -19,9 +19,20 @@ Filesystem envelopes for content; cmux notify for attention. Phase 1 delivery no
   bus-spec.md                 # this file
 ```
 
-- Inbox folder name = **instance intercom/role name** from `sessions.json` (`plan`, `scout-t8785`, `orchestrator`).
+- Inbox folder name = **instance name** from `sessions.json` (`plan`, `scout-t8785`, `orchestrator`).
 - Always write new messages into `pending/` using atomic create (`*.tmp` → rename to `*.json`).
 - Receiver moves `pending → processing` when claimed, then `processing → done` when handled (or delete after archive to outbox).
+
+## Scripts location
+
+`bus.py` / `memory.py` / `agency_ctl.py` live in the **installed multi-agency package** (`…/agency/scripts/`), **not** under `.pi/agency/scripts/`. Project `.pi/agency/` holds state (inbox, sessions, charters copy). Boot prompts pass the absolute package `bus.py` path — use that as `$BUS`.
+
+```bash
+export AGENCY_ROOT="$PWD/.pi/agency"
+export AGENCY_PROJECT_ROOT="$PWD"
+BUS="python3 /path/to/multi-agency/agency/scripts/bus.py"
+# or: absolute path printed in specialist boot / /agency-hub
+```
 
 ## Envelope schema
 
@@ -71,7 +82,7 @@ Example: `20260712T165630Z-a1b2-delegate.json`
 | `payload` | Inline object; keep small |
 | `payloadPath` | Prefer for large content; file under `artifacts/<taskId>/` |
 | Exactly one of | Prefer `payloadPath` when body > ~2KB |
-| `notify.cmux` | If true, sender should fire `cmux notify` after write |
+| `notify.cmux` | If true, sender fires `cmux notify` after write (injectable in tests) |
 | `ttlSec` | Receiver may ignore/expire stale pending messages |
 
 ### Type semantics
@@ -85,11 +96,11 @@ Example: `20260712T165630Z-a1b2-delegate.json`
 | `progress` | Specialist → Orchestrator | Non-blocking checkpoint |
 | `release` | Orchestrator → specialist | Teardown hint (temp) or idle (persistent) |
 
-Phase 1: specialists do **not** write to peer inboxes even if ACL would allow later.
+Phase 1: specialists do **not** write to peer inboxes even if ACL would allow later. ACL peers come from `agents.yaml` via the catalog layer.
 
 ## Send protocol
 
-1. Validate ACL (`from`→`to`): hub edges always; peer edges Phase 2+.
+1. Validate ACL (`from`→`to`): hub edges always; peer edges require `--allow-peers` (Phase 2+).
 2. If large body → write `artifacts/<taskId>/…`, set `payloadPath`.
 3. Write envelope to `inbox/<to>/pending/<filename>.json` (atomic rename).
 4. Optionally copy to `outbox/<id>.json`.
@@ -98,9 +109,9 @@ Phase 1: specialists do **not** write to peer inboxes even if ACL would allow la
    Optional nudge: `cmux send --surface <id> $'\n'` only to wake a stuck idle TTY — never paste full JSON into the TTY.
 6. Update `sessions.json` status if needed (`working` when delegating).
 
-## Receive protocol (poll — Phase 1)
+## Receive protocol (specialist poll)
 
-Each agent (including Orchestrator) on an idle loop or between tool turns:
+Each specialist on an idle loop or between tool turns:
 
 1. List `inbox/<me>/pending/*.json` sorted by filename (time order).
 2. Claim oldest: rename into `processing/`.
@@ -109,12 +120,23 @@ Each agent (including Orchestrator) on an idle loop or between tool turns:
 5. For `ask`: write `reply` into asker’s pending; notify.
 6. Poll interval default: **5s** while waiting; **1s** after self-notify or when status is `working` and awaiting reply. No busy-spin.
 
-### Orchestrator wait-by-taskId (locked)
+Always `send` a `report`/`ask` then `done` before going idle. Silent settle without a hub message triggers lifecycle recovery (nudge → abandon/respawn).
 
-Preferred control plane: **spawn → delegate → `agency_wait`**. Do not use a one-shot run tool.
+## Hub delivery (lifecycle bridge — primary)
+
+Preferred control plane: **spawn → delegate → free hub**. Do not use a one-shot run tool. Do **not** block in `agency_wait` for normal completion.
+
+1. Specialist writes `report`/`ask` into `inbox/orchestrator/pending/`.
+2. Lifecycle extension + `hub_delivery` claim the envelope.
+3. If hub is idle → **push** into Orchestrator chat; if hub is busy → **queue** banner and deliver on settle.
+4. Bus files remain the durable audit trail; push is delivery UX only.
+
+### Legacy wait-by-taskId (fallback)
+
+Manual poll when push delivery is unavailable:
 
 ```bash
-python3 .pi/agency/scripts/bus.py wait --as orchestrator --task-id <id> --timeout 120 --interval 2
+$BUS wait --as orchestrator --task-id <id> --timeout 120 --interval 2
 # or: agency_ctl wait / agency_wait tool
 ```
 
@@ -126,17 +148,16 @@ Behavior:
 4. Timeout with no match → `{ status: "timeout" }` — **safe to call wait again** with the same `taskId`.
 5. Non-matching pending messages stay in `pending/` for later waits.
 
-Helpers (Phase 1):
+Helpers:
 
 ```bash
-python3 .pi/agency/scripts/bus.py send --from orchestrator --to scout-t3f2 --type delegate --task-id … --payload-json '…'
-python3 .pi/agency/scripts/bus.py recv --as scout-t3f2
-python3 .pi/agency/scripts/bus.py wait --as orchestrator --task-id … --timeout 120
-python3 .pi/agency/scripts/bus.py done --as scout-t3f2 --path …
-python3 .pi/agency/scripts/bus.py list --as orchestrator
-# wrappers: .pi/agency/scripts/bus-send / bus-recv
+$BUS send --from orchestrator --to scout-t3f2 --type delegate --task-id … --payload-json '…'
+$BUS recv --as scout-t3f2
+$BUS wait --as orchestrator --task-id … --timeout 120
+$BUS done --as scout-t3f2 --path …
+$BUS list --as orchestrator
+$BUS init <instanceName>
 ```
-
 
 ## Notify conventions
 
@@ -160,6 +181,7 @@ printf '\e]777;notify;%s;%s\a' "orchestrator" "report auth-explore-scout-1"
 - `ttlSec` exceeded in `pending/` → move to `done/` with `expired` marker file or delete.
 - Missing `to` inbox dir → create on spawn (Orchestrator spawn playbook).
 - Sender outside cmux: still write files; skip `cmux notify` and tell human to check Orchestrator pane.
+- Silent settle without report → recovery layer: grace → one nudge → abandon/respawn same `taskId`.
 
 ## Out of scope (v0)
 

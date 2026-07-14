@@ -23,16 +23,17 @@ If `mode` is missing, use `repo-recon`.
 
 ## Hard rules
 
-- Bus only to **orchestrator**. Escalate with `--type ask`.
+- Bus only to **orchestrator** (package `$BUS` from boot — not `.pi/agency/scripts/…`). Escalate with `--type ask`.
 - Default **read-only**. No spawn/cmux.
 - Do not invent file contents. Prefer artifact path for large notes: `.pi/agency/artifacts/<taskId>/`.
+- Always `send` report/ask then `done` before idle (silent settle triggers recovery).
 - Never bind ce-ideate or ce-sweep as your skill — Orchestrator routes ideation to Brainstorm and feedback sweeps elsewhere.
 
 ## Procedure
 
 1. Parse packet: `goal`, `mode`, `contextPaths`, `cwd` (reference-repo), success criteria, stop rules.
 2. Explore with read/search tools only (unless packet allows edits).
-3. Write `## Scout report` (charter shape); `bus send --type report`; `bus done`.
+3. Write `## Scout report` (charter shape); `python3 "$BUS" send --type report …`; `python3 "$BUS" done …`.
 
 ## Suggested next specialist
 

@@ -37,11 +37,13 @@ Rules:
 - On **reuse**, Orchestrator includes `memoryPath` in the delegate payload `contextPaths`.
 - On **teardown**, leave NOTES on disk (audit); do not auto-delete.
 
-Init helper:
+Init helper (package scripts — never `.pi/agency/scripts/…`; use absolute path from boot / `/agency-hub`):
 
 ```bash
-python3 .pi/agency/scripts/memory.py init --as plan --role plan
-python3 .pi/agency/scripts/memory.py path --as plan
+export AGENCY_ROOT="$PWD/.pi/agency"
+python3 "$MEMORY" init --as plan --role plan
+python3 "$MEMORY" path --as plan
+# MEMORY=…/multi-agency/agency/scripts/memory.py
 ```
 
 ## docs/solutions integration

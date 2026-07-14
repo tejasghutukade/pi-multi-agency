@@ -27,21 +27,23 @@ Do **not** load ce-ideate or ce-sweep as your skill.
 
 ## Bus loop
 
-Your instance name is provided in the first user message (and matches `/name` if set).
+Your instance name is in the first-turn / boot prompt (and matches `--name` if set).
+
+Scripts live in the **multi-agency package** (`…/agency/scripts/`), not under `.pi/agency/scripts/`. Use the absolute `bus.py` path from your boot prompt as `$BUS`. Agency **state** (inbox, artifacts) stays under the project:
 
 ```bash
-export AGENCY_ROOT="$PWD/.pi/agency"
-python3 .pi/agency/scripts/bus.py recv --as <instanceName> --wait 60 --interval 2
+export AGENCY_ROOT="<project>/.pi/agency"
+python3 "$BUS" recv --as <instanceName> --wait 60 --interval 2
 ```
 
 On `delegate`: explore per payload; write large notes under `.pi/agency/artifacts/<taskId>/`; then:
 
 ```bash
-python3 .pi/agency/scripts/bus.py send --from <instanceName> --to orchestrator --type report --task-id <taskId> --payload-json '…'
-python3 .pi/agency/scripts/bus.py done --as <instanceName> --path <processing-file>
+python3 "$BUS" send --from <instanceName> --to orchestrator --type report --task-id <taskId> --payload-json '…'
+python3 "$BUS" done --as <instanceName> --path <processing-file>
 ```
 
-Blocked → `--type ask` to orchestrator; wait for `reply`. Never use pi-intercom for agency traffic.
+Blocked → `--type ask` to orchestrator; `recv` again for `reply`. Never use pi-intercom for agency traffic. Always `send` then `done` before going idle — silent settle without a bus message triggers recovery.
 
 ## Output shape
 
