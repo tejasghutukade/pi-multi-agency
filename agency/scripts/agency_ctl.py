@@ -42,6 +42,7 @@ from cmux_pane import (  # noqa: E402
     surface_alive,
 )
 from ledger import (  # noqa: E402
+    clear_instance,
     find_idle_role,
     find_instance,
     find_instance_by_task,
@@ -521,12 +522,7 @@ def cmd_release(args: argparse.Namespace) -> int:
         r = close_surface(str(surface))
         closed = {"ok": r.returncode == 0, "stdout": (r.stdout or "").strip(), "stderr": (r.stderr or "").strip()}
 
-    data["instances"] = [
-        i
-        for i in (data.get("instances") or [])
-        if i.get("intercomName") != inst.get("intercomName")
-        and i.get("instanceId") != inst.get("instanceId")
-    ]
+    clear_instance(data, inst)
     save_sessions(root, data)
     print(
         json.dumps(

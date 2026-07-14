@@ -148,47 +148,7 @@ def cmd_idle_teardown(args: argparse.Namespace) -> int:
         )
         return 0
 
-    ctl_path = Path(__file__).resolve().parent / "agency_ctl.py"
-    env = {
-        **os.environ,
-        "AGENCY_ROOT": str(root),
-        "AGENCY_PROJECT_ROOT": str(ctl.project_root()),
-    }
-    r = subprocess.run(
-        [
-            sys.executable,
-            str(ctl_path),
-            "release",
-            "--name",
-            str(name),
-            "--mode",
-            "teardown",
-            "--recovery",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env=env,
-        cwd=str(ctl.project_root()),
-    )
-    if r.returncode != 0:
-        print(
-            json.dumps(
-                {
-                    "ok": False,
-                    "action": "idle-teardown",
-                    "error": (r.stderr or r.stdout or "release failed").strip(),
-                    "instance": name,
-                },
-                indent=2,
-            ),
-            file=sys.stderr,
-        )
-        return 1
-    try:
-        release_out = json.loads(r.stdout) if r.stdout.strip() else {"ok": True}
-    except json.JSONDecodeError:
-        release_out = {"raw": r.stdout}
+    closed = teardown_instance(ctl, root, inst, keep_pane=False)
     print(
         json.dumps(
             {
@@ -197,7 +157,7 @@ def cmd_idle_teardown(args: argparse.Namespace) -> int:
                 "reason": args.reason or "temp-idle-timeout",
                 "idleSec": args.idle_sec or TEMP_IDLE_TEARDOWN_SEC,
                 "instance": name,
-                "release": release_out,
+                "closed": closed,
             },
             indent=2,
         )
@@ -375,48 +335,28 @@ def cmd_abandon(args: argparse.Namespace) -> int:
     workflow_id = last.get("workflowId")
 
     # teardown without orchestrator gate
-    surface = inst.get("cmuxSurface")
-    closed = None
-    if surface and not args.keep_pane:
-        r = close_surface(str(surface))
-        closed = {"ok": r.returncode == 0}
+    closed = teardown_instance(ctl, root, inst, keep_pane=bool(args.keep_pane))
 
-    data["instances"] = [
-        i
-        for i in (data.get("instances") or [])
-        if i.get("intercomName") != inst.get("intercomName")
-        and i.get("instanceId") != inst.get("instanceId")
-    ]
-    ctl.save_sessions(root, data)
+    from agent_spawn import spawn_specialist
 
-    ctl_path = Path(__file__).resolve().parent / "agency_ctl.py"
-    env = {
-        **os.environ,
-        "AGENCY_ROOT": str(root),
-        "AGENCY_PROJECT_ROOT": str(ctl.project_root()),
-    }
-    spawn_args = [
-        sys.executable,
-        str(ctl_path),
-        "spawn",
-        "--role",
-        str(role),
-        "--lifecycle",
-        str(lifecycle),
-        "--recovery",
-    ]
-    if cwd:
-        spawn_args.extend(["--cwd", str(cwd)])
-    spawn = subprocess.run(spawn_args, capture_output=True, text=True, timeout=180, env=env, cwd=str(ctl.project_root()))
-    if spawn.returncode != 0:
+    try:
+        spawn_out = spawn_specialist(
+            str(role),
+            lifecycle=str(lifecycle),
+            cwd=str(cwd) if cwd else None,
+            recovery=True,
+            boot_wait=0,
+            nudge=False,
+        )
+    except Exception as e:
         print(
             json.dumps(
                 {
                     "ok": False,
                     "action": "abandon",
                     "error": "respawn failed",
-                    "stderr": spawn.stderr,
-                    "stdout": spawn.stdout,
+                    "stderr": str(e),
+                    "stdout": "",
                     "closed": closed,
                 },
                 indent=2,
@@ -424,14 +364,16 @@ def cmd_abandon(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    try:
-        spawn_out = json.loads(spawn.stdout)
-    except json.JSONDecodeError:
-        spawn_out = {"raw": spawn.stdout}
     new_name = (spawn_out.get("instance") or {}).get("intercomName")
     if not new_name:
         raise RuntimeError(f"spawn succeeded but no instance name: {spawn_out}")
 
+    ctl_path = Path(__file__).resolve().parent / "agency_ctl.py"
+    env = {
+        **os.environ,
+        "AGENCY_ROOT": str(root),
+        "AGENCY_PROJECT_ROOT": str(ctl.project_root()),
+    }
     del_args = [
         sys.executable,
         str(ctl_path),
@@ -505,5 +447,6 @@ def cmd_abandon(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
 
 
