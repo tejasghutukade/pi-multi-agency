@@ -347,7 +347,7 @@ The hub freelances when it still has a full coding toolkit and only soft “pref
 
 Plain `pi --append-system-prompt .pi/agents/orchestrator.md` without `--tools` is **non-compliant** and will drift into solo coding. Compaction does not remove the system prompt; the tools lock is what removes capability.
 
-**Implemented (v1 control plane):** package `extensions/multi-agency/` + `agency/scripts/agency_ctl.py` as a thin façade over layered modules (`ledger`, `bus`, `cmux_pane`, `pi_launch`, `hub_delivery`, `recovery`, `agent_spawn`). The extension owns cmux + `sessions.json`; messaging stays on `bus.py` + cmux notify (pi-intercom demoted). Orchestrator-only gate: caller cmux surface must match the claimed orchestrator row (`/agency-claim` or first spawn). Project state after `agency_init` lives under `<project>/.pi/agency/` (scripts stay in the package).
+**Implemented (v1 control plane):** package `extensions/multi-agency/` + `agency/scripts/agency_ctl.py` as a thin façade over layered modules (`ledger`, `bus`, `cmux_pane`, `pi_launch`, `hub_delivery`, `recovery`, `agent_spawn`). The extension owns cmux + `sessions.json`; messaging runs over the **broker socket** via the `agency_*` tools (`bus.py` is audit/compat-only; pi-intercom demoted). Orchestrator-only gate: caller cmux surface must match the claimed orchestrator row (`/agency-claim` or first spawn). Project state after `agency_init` lives under `<project>/.pi/agency/` (scripts stay in the package).
 
 **Roster durability:** `ledger.save_sessions` writes `sessions.json` via temp file + atomic rename; `load_sessions` retries briefly on empty/partial reads so concurrent lifecycle status updates cannot break hub `ack-delivery` after a report was already pushed.
 
@@ -824,7 +824,20 @@ For the golden path **Scout → Brainstorm → Plan**:
 
 ## Communication Transport (revisiting)
 
-**Decided direction:** **hybrid — filesystem message bus + cmux notify/flash for attention.** Peer ACL (who may talk to whom) stays; only the *transport* changes.
+> **Status — current transport (v1):** agency traffic is brokered over a
+> **local socket** between Pi panes (`extensions/multi-agency/broker/`).
+> Specialists receive delegates/replies **in-session** (the lifecycle bridge
+> injects them) and send via the **`agency_report` / `agency_ask` /
+> `agency_progress` tools**. The filesystem bus (`bus.py`) is **audit/
+> compatibility-only** and is *not* used by specialists. The design notes
+> below describe the earlier **hybrid `bus.py` + cmux notify** transport
+> that the broker replaced; they are kept as historical rationale, not as
+> live operating instructions.
+>
+> See [`agency/bus-spec.md`](../../agency/bus-spec.md) for the
+> broker-only note specialists actually follow.
+
+**Decided direction (historical, pre-broker):** **hybrid — filesystem message bus + cmux notify/flash for attention.** Peer ACL (who may talk to whom) stays; only the *transport* changes.
 
 ### Does cmux give us a message bus?
 
@@ -850,9 +863,12 @@ Short answer: **no dedicated agent-to-agent mailbox.** cmux ([getting started](h
 | **D. cmux notify-only** | Attention signals only | Great UX for humans | Too small for delegation packets / artifacts |
 | **E. Hybrid (chosen)** | **Files for content**; **cmux notify/flash for attention**; optional `surface.send` only to wake a waiting specialist | Best of B+D; matches “pass paths not content” | Slightly more plumbing |
 
-### Hybrid design (v0) — specified
+### Hybrid design (historical, v0) — specified
 
-**Full spec:** [`.pi/agency/bus-spec.md`](../.pi/agency/bus-spec.md)
+> The `bus.py` file bus below is now audit/compat-only. Live traffic uses the
+> broker socket + `agency_*` tools (see banner at top of this section).
+
+**Full spec (historical):** [`.pi/agency/bus-spec.md`](../.pi/agency/bus-spec.md)
 
 | Concern | Decision |
 |---------|----------|
@@ -884,7 +900,7 @@ Short answer: **no dedicated agent-to-agent mailbox.** cmux ([getting started](h
 
 **pi-intercom:** optional/legacy; not required for Phase 1 exit once hybrid works.
 
-**Helpers (done):** `.pi/agency/scripts/bus.py` (+ `bus-send` / `bus-recv` wrappers) — `send` / `recv` / `done` / `list` / `init`.
+**Helpers (historical):** `.pi/agency/scripts/bus.py` (+ `bus-send` / `bus-recv` wrappers) — `send` / `recv` / `done` / `list` / `init`. These are legacy/compat helpers; the broker + `agency_*` tools are the supported path.
 
 ### Peer ACL vs transport
 
