@@ -347,9 +347,11 @@ The hub freelances when it still has a full coding toolkit and only soft “pref
 
 Plain `pi --append-system-prompt .pi/agents/orchestrator.md` without `--tools` is **non-compliant** and will drift into solo coding. Compaction does not remove the system prompt; the tools lock is what removes capability.
 
-**Implemented (v1 control plane):** package `extensions/multi-agency/` + `agency/scripts/agency_ctl.py`. The extension owns cmux + `sessions.json`; messaging stays on `bus.py` + cmux notify (pi-intercom demoted). Orchestrator-only gate: caller cmux surface must match the claimed orchestrator row (`/agency-claim` or first spawn). Project state after `agency_init` lives under `<project>/.pi/agency/` (scripts stay in the package).
+**Implemented (v1 control plane):** package `extensions/multi-agency/` + `agency/scripts/agency_ctl.py` as a thin façade over layered modules (`ledger`, `bus`, `cmux_pane`, `pi_launch`, `hub_delivery`, `recovery`, `agent_spawn`). The extension owns cmux + `sessions.json`; messaging stays on `bus.py` + cmux notify (pi-intercom demoted). Orchestrator-only gate: caller cmux surface must match the claimed orchestrator row (`/agency-claim` or first spawn). Project state after `agency_init` lives under `<project>/.pi/agency/` (scripts stay in the package).
 
-**Ops observer (v0.3+):** `agency_ctl observe` serves a localhost dashboard projecting `sessions.json` + inbox stages. Optional `AGENCY_EVENTS=1` appends `.pi/agency/events.jsonl` from thin emit hooks (ledger/bus/cmux/recovery) — timeline aid only; never authoritative. UI attaches anytime; claim is a roster badge.
+**Roster durability:** `ledger.save_sessions` writes `sessions.json` via temp file + atomic rename; `load_sessions` retries briefly on empty/partial reads so concurrent lifecycle status updates cannot break hub `ack-delivery` after a report was already pushed.
+
+**Ops observer (v0.3+):** `agency_ctl observe` serves a localhost dashboard projecting `sessions.json` + inbox stages. Optional `AGENCY_EVENTS=1` appends `.pi/agency/events.jsonl` from thin emit hooks (ledger/bus/cmux/recovery) — timeline aid only; never authoritative. UI attaches anytime; claim is a roster badge. Two projects each use their own `AGENCY_ROOT`; run a second observer on another `--port` if both UIs are up.
 
 ### Pi lifecycle bridge (v0.3 — shipping)
 
