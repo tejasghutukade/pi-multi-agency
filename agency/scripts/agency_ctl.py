@@ -18,6 +18,21 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from agency_paths import (  # noqa: E402
+    agency_root,
+    kit_root,
+    package_root,
+    project_root,
+    resolve_resource,
+    scripts_dir,
+)
+from catalog import (  # noqa: E402
+    agent_file_for,
+    load_agents,
+    parse_agent_frontmatter,
+    role_of,
+)
+from catalog import HUB as CATALOG_HUB  # noqa: E402
 from cmux_pane import (  # noqa: E402
     caller_surface,
     close_surface,
@@ -26,8 +41,18 @@ from cmux_pane import (  # noqa: E402
     identify,
     surface_alive,
 )
+from ledger import (  # noqa: E402
+    find_idle_role,
+    find_instance,
+    find_instance_by_task,
+    load_sessions,
+    make_instance_name,
+    save_sessions,
+    specialist_count,
+)
 
 HUB = "orchestrator"
+assert CATALOG_HUB == HUB
 STARTING_TIMEOUT_SEC = 90
 # Hub process allowlist: read/search + agency_* — no edit/write/bash (see docs/architecture.md).
 HUB_TOOLS = (
@@ -59,134 +84,8 @@ def lifecycle_run(args: list[str], timeout: float = 120) -> dict[str, Any]:
     return json.loads(out) if out else {"ok": True}
 
 
-def package_root() -> Path:
-    """Repo / pi-package root (parent of agency/)."""
-    return Path(__file__).resolve().parent.parent.parent
-
-
-def kit_root() -> Path:
-    return package_root() / "agency"
-
-
-def scripts_dir() -> Path:
-    return Path(__file__).resolve().parent
-
-
-def agency_root() -> Path:
-    env = os.environ.get("AGENCY_ROOT")
-    if env:
-        return Path(env).resolve()
-    proj = Path(os.environ.get("AGENCY_PROJECT_ROOT") or Path.cwd()).resolve()
-    local = proj / ".pi" / "agency"
-    if local.is_dir():
-        return local.resolve()
-    return kit_root()
-
-
-def project_root() -> Path:
-    env = os.environ.get("AGENCY_PROJECT_ROOT")
-    if env:
-        return Path(env).resolve()
-    root = agency_root()
-    if root.name == "agency" and root.parent.name == ".pi":
-        return root.parent.parent.resolve()
-    return Path.cwd().resolve()
-
-
-def resolve_resource(rel: str | None) -> Path | None:
-    """Resolve a path against project, then package root, then kit."""
-    if not rel:
-        return None
-    p = Path(rel)
-    if p.is_absolute():
-        return p
-    for base in (project_root(), package_root(), kit_root()):
-        cand = (base / p).resolve()
-        if cand.exists():
-            return cand
-    return (project_root() / p).resolve()
-
-
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def load_sessions(root: Path) -> dict[str, Any]:
-    path = root / "sessions.json"
-    if not path.exists():
-        return {"version": 1, "instances": []}
-    return json.loads(path.read_text())
-
-
-def save_sessions(root: Path, data: dict[str, Any]) -> None:
-    (root / "sessions.json").write_text(json.dumps(data, indent=2) + "\n")
-
-
-def _parse_agents_fallback(text: str) -> dict[str, Any]:
-    agents: dict[str, Any] = {"agents": {}, "spawn": {"maxSpecialistPanes": 6}}
-    current: str | None = None
-    in_agents = False
-    for line in text.splitlines():
-        if line.startswith("agents:"):
-            in_agents = True
-            continue
-        if line.startswith("spawn:"):
-            in_agents = False
-            current = None
-            continue
-        if in_agents and line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":"):
-            current = line.strip().rstrip(":")
-            if current.startswith("#"):
-                current = None
-                continue
-            agents["agents"][current] = {"peers": [], "lifecycleDefault": "temporary"}
-            continue
-        if not current:
-            continue
-        if "lifecycleDefault:" in line:
-            agents["agents"][current]["lifecycleDefault"] = line.split(":", 1)[1].strip()
-        elif "charterPath:" in line:
-            agents["agents"][current]["charterPath"] = line.split(":", 1)[1].strip()
-        elif "skillPath:" in line:
-            val = line.split(":", 1)[1].strip()
-            agents["agents"][current]["skillPath"] = None if val in ("null", "~", "") else val
-        elif "agentPath:" in line:
-            agents["agents"][current]["agentPath"] = line.split(":", 1)[1].strip()
-        elif "peers:" in line:
-            rest = line.split("peers:", 1)[1].strip()
-            if rest.startswith("[") and rest.endswith("]"):
-                inner = rest[1:-1].strip()
-                agents["agents"][current]["peers"] = [p.strip() for p in inner.split(",") if p.strip()]
-        elif "maxSpecialistPanes:" in line:
-            try:
-                agents["spawn"]["maxSpecialistPanes"] = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                pass
-    return agents
-
-
-def load_agents(root: Path) -> dict[str, Any]:
-    path = root / "agents.yaml"
-    if not path.exists():
-        path = kit_root() / "agents.yaml"
-    if not path.exists():
-        return {"agents": {}, "spawn": {"maxSpecialistPanes": 6}}
-    text = path.read_text()
-    try:
-        import yaml  # type: ignore
-
-        data = yaml.safe_load(text) or {}
-        return data if isinstance(data, dict) else _parse_agents_fallback(text)
-    except ImportError:
-        return _parse_agents_fallback(text)
-
-
-def role_of(instance: str) -> str:
-    if instance == HUB:
-        return HUB
-    if "-t" in instance:
-        return instance.split("-t", 1)[0]
-    return instance
 
 
 def bus_py(_root: Path | None = None) -> Path:
@@ -212,13 +111,6 @@ def bus_run(root: Path, args: list[str], timeout: float = 60) -> dict[str, Any]:
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip() or r.stdout.strip() or f"bus exit {r.returncode}")
     return json.loads(r.stdout)
-
-
-def find_instance_by_task(data: dict[str, Any], task_id: str) -> dict[str, Any] | None:
-    for inst in data.get("instances") or []:
-        if inst.get("taskId") == task_id:
-            return inst
-    return None
 
 
 def cmd_wait(args: argparse.Namespace) -> int:
@@ -355,56 +247,6 @@ def require_orchestrator(root: Path, *, recovery: bool = False) -> dict[str, Any
             None,
         )
     return ensure_orchestrator(root)
-
-
-def find_instance(data: dict[str, Any], name: str) -> dict[str, Any] | None:
-    for i in data.get("instances") or []:
-        if i.get("intercomName") == name or i.get("instanceId") == name:
-            return i
-    return None
-
-
-def find_idle_role(data: dict[str, Any], role: str) -> dict[str, Any] | None:
-    for i in data.get("instances") or []:
-        if i.get("role") == role and i.get("status") == "idle" and i.get("intercomName") != HUB:
-            return i
-    return None
-
-
-def specialist_count(data: dict[str, Any]) -> int:
-    return sum(1 for i in (data.get("instances") or []) if i.get("role") != HUB)
-
-
-def make_instance_name(role: str, lifecycle: str) -> str:
-    if lifecycle == "persistent":
-        return role
-    return f"{role}-t{secrets.token_hex(2)}"
-
-
-def agent_file_for(role: str, agent: dict[str, Any] | None) -> Path | None:
-    rel = (agent or {}).get("agentPath") or f".pi/agents/{role}.md"
-    path = resolve_resource(rel)
-    if path and path.is_file():
-        return path
-    alt = resolve_resource(f"agents/{role}.md")
-    return alt if alt and alt.is_file() else None
-
-
-def parse_agent_frontmatter(path: Path) -> dict[str, str]:
-    text = path.read_text()
-    if not text.startswith("---"):
-        return {}
-    end = text.find("\n---", 3)
-    if end < 0:
-        return {}
-    block = text[3:end].strip()
-    out: dict[str, str] = {}
-    for line in block.splitlines():
-        if ":" not in line:
-            continue
-        k, v = line.split(":", 1)
-        out[k.strip()] = v.strip().strip("'\"")
-    return out
 
 
 def cmd_list(_args: argparse.Namespace) -> int:

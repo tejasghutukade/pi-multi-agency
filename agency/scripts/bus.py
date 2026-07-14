@@ -15,16 +15,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from agency_paths import agency_root as paths_agency_root  # noqa: E402
+from catalog import load_agents, role_of  # noqa: E402
+from catalog import HUB as CATALOG_HUB  # noqa: E402
+
 TYPES = ("delegate", "report", "ask", "reply", "progress", "release")
 HUB = "orchestrator"
+assert CATALOG_HUB == HUB
 
 
 def agency_root() -> Path:
     env = os.environ.get("AGENCY_ROOT")
     if env:
         return Path(env).resolve()
-    here = Path(__file__).resolve().parent.parent
-    return here
+    # Prefer project AGENCY_ROOT semantics when available; kit fallback for bus CLI alone.
+    root = paths_agency_root()
+    return root
 
 
 def utc_now() -> datetime:
@@ -48,39 +58,7 @@ def ensure_inbox(root: Path, name: str) -> Path:
 
 
 def load_agents_yaml(root: Path) -> dict[str, Any]:
-    path = root / "agents.yaml"
-    if not path.exists():
-        return {}
-    try:
-        import yaml  # type: ignore
-    except ImportError:
-        return _parse_peers_fallback(path.read_text())
-    data = yaml.safe_load(path.read_text()) or {}
-    return data if isinstance(data, dict) else {}
-
-
-def _parse_peers_fallback(text: str) -> dict[str, Any]:
-    agents: dict[str, Any] = {"agents": {}}
-    current = None
-    for line in text.splitlines():
-        if line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":"):
-            current = line.strip().rstrip(":")
-            agents["agents"][current] = {"peers": []}
-        elif current and "peers:" in line:
-            rest = line.split("peers:", 1)[1].strip()
-            if rest.startswith("[") and rest.endswith("]"):
-                inner = rest[1:-1].strip()
-                peers = [p.strip() for p in inner.split(",") if p.strip()]
-                agents["agents"][current]["peers"] = peers
-    return agents
-
-
-def role_of(instance: str) -> str:
-    if instance == HUB:
-        return HUB
-    if "-t" in instance:
-        return instance.split("-t", 1)[0]
-    return instance
+    return load_agents(root)
 
 
 def acl_allows(root: Path, frm: str, to: str, phase1_hub_only: bool = True) -> bool:

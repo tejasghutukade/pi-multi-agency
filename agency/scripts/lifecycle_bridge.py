@@ -18,6 +18,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from cmux_pane import close_surface, send_to_surface  # noqa: E402
+from ledger import find_by_surface  # noqa: E402
 
 # draft timers from docs/architecture.md
 SILENT_SETTLE_GRACE_SEC = 60
@@ -86,15 +87,6 @@ def has_hub_message_for_task(root: Path, task_id: str) -> bool:
         if item["envelope"].get("taskId") == task_id:
             return True
     return False
-
-
-def find_by_surface(data: dict[str, Any], surface: str | None) -> dict[str, Any] | None:
-    if not surface:
-        return None
-    for i in data.get("instances") or []:
-        if i.get("cmuxSurface") == surface:
-            return i
-    return None
 
 
 def cmd_whoami(_args: argparse.Namespace) -> int:
