@@ -13,7 +13,9 @@ import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { AgencyBrokerRuntime } from "./broker-runtime.ts";
 import { installLifecycleBridge } from "./lifecycle.ts";
+import { makeAgencyMessage } from "./messages.ts";
 
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -84,13 +86,6 @@ function runCtl(
 			resolve({ code: code ?? 1, stdout, stderr });
 		});
 	});
-}
-
-function textResult(obj: unknown) {
-	return {
-		content: [{ type: "text" as const, text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }],
-		details: typeof obj === "object" && obj ? obj : { text: obj },
-	};
 }
 
 type AgencyInstance = {
@@ -167,7 +162,16 @@ type AgencyDelegatePayload = {
 		id?: string;
 		path?: string;
 		notified?: boolean;
+		transport?: "broker" | string;
+		delivered?: boolean;
+		reason?: string;
 	};
+	wake?: {
+		attempted?: boolean;
+		ok?: boolean;
+		surface?: string;
+		error?: string;
+	} | null;
 	instance?: AgencyInstance & {
 		lastDelegate?: {
 			workflowId?: string;
@@ -191,15 +195,20 @@ function formatAgencyDelegate(payload: AgencyDelegatePayload): string {
 	const inst = payload.instance || {};
 	const d = inst.lastDelegate || {};
 	const p = d.payload || {};
+	const w = payload.wake;
 
 	const lines: string[] = [];
-	lines.push("Delegate queued");
+	lines.push("Delegate delivered");
 	lines.push(`- To: ${payload.to || "-"}`);
 	lines.push(`- taskId: ${payload.taskId || "-"}`);
 	if (d.workflowId) lines.push(`- workflowId: ${d.workflowId}`);
-	lines.push(`- Bus envelope: ${b.id || "-"} (${b.ok ? "ok" : "failed"})`);
-	lines.push(`- Notified: ${b.notified ? "yes" : "no"}`);
-	if (b.path) lines.push(`- Pending file: ${b.path}`);
+	lines.push(`- Transport: ${b.transport || "broker"}${b.delivered != null ? ` (${b.delivered ? "delivered" : "not delivered"})` : ""}`);
+	if (b.id) lines.push(`- Message id: ${b.id}`);
+	if (b.reason) lines.push(`- Transport reason: ${b.reason}`);
+	if (w?.attempted) {
+		lines.push(`- Wake ping: ${w.ok ? "sent" : "failed"}${w.surface ? ` (${w.surface})` : ""}`);
+		if (w.error) lines.push(`- Wake error: ${w.error}`);
+	}
 	lines.push("");
 	lines.push("Instance state");
 	lines.push(`- ${inst.intercomName || "-"} · ${inst.role || "-"} · ${inst.status || "-"}`);
@@ -212,12 +221,191 @@ function formatAgencyDelegate(payload: AgencyDelegatePayload): string {
 	return lines.join("\n");
 }
 
+type AgencyReleasePayload = {
+	action?: "idle" | "teardown" | string;
+	instance?: AgencyInstance;
+	cleared?: string;
+	closed?: { ok?: boolean } | null;
+};
+
+type AgencySpawnPayload = {
+	action?: "spawn" | "reuse" | "spawn-dry-run" | string;
+	instance?: AgencyInstance & {
+		cwd?: string;
+		agentPath?: string | null;
+	};
+	bootWaitSec?: number;
+	bootPromptPath?: string;
+	piCommand?: string;
+};
+
+type AgencyInitPayload = {
+	action?: "init" | string;
+	skipped?: boolean;
+	reason?: string;
+	projectRoot?: string;
+	agencyRoot?: string;
+	packageRoot?: string;
+	copied?: string[];
+	next?: string[];
+};
+
+function formatAgencyInit(payload: AgencyInitPayload): string {
+	const lines: string[] = [];
+	if (payload.skipped) {
+		lines.push("Agency already initialized");
+		if (payload.reason) lines.push(`- Reason: ${payload.reason}`);
+	} else {
+		lines.push("Agency initialized");
+		lines.push(`- Copied entries: ${(payload.copied || []).length}`);
+	}
+	if (payload.projectRoot) lines.push(`- Project: ${payload.projectRoot}`);
+	if (payload.agencyRoot) lines.push(`- Agency root: ${payload.agencyRoot}`);
+	if (!payload.skipped && (payload.next || []).length) {
+		lines.push("");
+		lines.push("Next:");
+		for (const step of payload.next || []) lines.push(`- ${step}`);
+	}
+	return lines.join("\n");
+}
+
+function formatAgencySpawn(payload: AgencySpawnPayload): string {
+	const i = payload.instance || {};
+	if (payload.action === "reuse") {
+		return [
+			"Reused existing instance",
+			`- Name: ${i.intercomName || "-"}`,
+			`- Role: ${i.role || "-"}`,
+			`- Status: ${i.status || "-"}`,
+			`- Surface: ${i.cmuxSurface || "-"}  Pane: ${i.cmuxPane || "-"}`,
+		].join("\n");
+	}
+
+	const title = payload.action === "spawn-dry-run" ? "Spawn dry-run prepared" : "Specialist spawned";
+	const lines: string[] = [title];
+	lines.push(`- Name: ${i.intercomName || "-"}`);
+	lines.push(`- Role: ${i.role || "-"} (${i.lifecycle || "-"})`);
+	lines.push(`- Status: ${i.status || "-"}`);
+	lines.push(`- Surface: ${i.cmuxSurface || "-"}  Pane: ${i.cmuxPane || "-"}`);
+	if (i.cwd) lines.push(`- CWD: ${i.cwd}`);
+	if (payload.action !== "spawn-dry-run") {
+		lines.push(`- Boot wait: ${payload.bootWaitSec ?? "-"}s`);
+		if (payload.bootPromptPath) lines.push(`- Boot prompt: ${payload.bootPromptPath}`);
+	}
+	if (payload.piCommand) lines.push(`- Pi command: ${clip(payload.piCommand, 160)}`);
+	return lines.join("\n");
+}
+
+function formatAgencyRelease(payload: AgencyReleasePayload): string {
+	if (payload.action === "idle") {
+		const i = payload.instance || {};
+		return [
+			"Instance set to idle (pane retained)",
+			`- Name: ${i.intercomName || "-"}`,
+			`- Role: ${i.role || "-"}`,
+			`- Status: ${i.status || "idle"}`,
+			`- Task cleared: ${i.taskId ? "no" : "yes"}`,
+			"- To close pane + remove from roster: use --mode teardown",
+		].join("\n");
+	}
+	if (payload.action === "teardown") {
+		const closeState = payload.closed == null ? "not requested" : payload.closed.ok ? "ok" : "failed";
+		return ["Instance released", `- Cleared: ${payload.cleared || "-"}`, `- Pane close: ${closeState}`].join("\n");
+	}
+	return `Release result: ${payload.action || "ok"}`;
+}
+
 export default function multiAgencyExtension(pi: ExtensionAPI) {
 	const packageRoot = findPackageRoot();
 	const projectRoot = findProjectRoot(process.cwd());
 	const ctl = (args: string[], signal?: AbortSignal) => runCtl(packageRoot, projectRoot, args, signal);
+	const broker = new AgencyBrokerRuntime(projectRoot);
 
-	installLifecycleBridge(pi, ctl);
+	installLifecycleBridge(pi, ctl, broker);
+
+	const commandAgencyList = async (_args: string, ctx: { ui: { notify: (msg: string, level?: string) => void } }) => {
+		const r = await ctl(["list"]);
+		if (r.code !== 0) {
+			ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "agency_list failed", "error");
+			return;
+		}
+		const payload = JSON.parse(r.stdout) as AgencyListPayload;
+		ctx.ui.notify(formatAgencyList(payload), "info");
+	};
+
+	const commandAgencyRelease = async (
+		rawArgs: string,
+		ctx: { ui: { notify: (msg: string, level?: string) => void } },
+	) => {
+		const tokens = (rawArgs || "").trim().split(/\s+/).filter(Boolean);
+		let name: string | undefined;
+		let mode: "auto" | "idle" | "teardown" = "auto";
+		let keepPane = false;
+		let force = false;
+
+		for (let i = 0; i < tokens.length; i++) {
+			const t = tokens[i];
+			if (t === "--name" && tokens[i + 1]) {
+				name = tokens[++i];
+				continue;
+			}
+			if (t === "--mode" && tokens[i + 1]) {
+				const m = tokens[++i] as "auto" | "idle" | "teardown";
+				if (m !== "auto" && m !== "idle" && m !== "teardown") {
+					ctx.ui.notify(`invalid --mode: ${m}`, "error");
+					return;
+				}
+				mode = m;
+				continue;
+			}
+			if (t === "--keep-pane") {
+				keepPane = true;
+				continue;
+			}
+			if (t === "--force") {
+				force = true;
+				continue;
+			}
+			if (t.startsWith("--")) {
+				ctx.ui.notify(`unknown flag: ${t}`, "error");
+				ctx.ui.notify("usage: /agency_release <name> [--mode auto|idle|teardown] [--keep-pane] [--force]", "info");
+				return;
+			}
+			if (!name) {
+				name = t;
+				continue;
+			}
+			ctx.ui.notify(`unexpected arg: ${t}`, "error");
+			ctx.ui.notify("usage: /agency_release <name> [--mode auto|idle|teardown] [--keep-pane] [--force]", "info");
+			return;
+		}
+
+		if (!name) {
+			ctx.ui.notify("usage: /agency_release <name> [--mode auto|idle|teardown] [--keep-pane] [--force]", "info");
+			return;
+		}
+
+		const args = ["release", "--name", name, "--mode", mode];
+		if (keepPane) args.push("--keep-pane");
+		if (force) args.push("--force");
+		const r = await ctl(args);
+		if (r.code !== 0) {
+			ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "agency_release failed", "error");
+			return;
+		}
+		const payload = JSON.parse(r.stdout) as AgencyReleasePayload;
+		ctx.ui.notify(formatAgencyRelease(payload), "info");
+	};
+
+	pi.registerCommand("agency_list", {
+		description: "List agency instances (readable summary)",
+		handler: commandAgencyList,
+	});
+
+	pi.registerCommand("agency_release", {
+		description: "Release an instance: /agency_release <name> [--mode auto|idle|teardown]",
+		handler: commandAgencyRelease,
+	});
 
 	pi.registerCommand("agency-init", {
 		description: "Scaffold .pi/agency + .pi/agents in this project from the multi-agency package",
@@ -399,7 +587,11 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.force) args.push("--force");
 			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_init failed");
-			return textResult(JSON.parse(r.stdout));
+			const payload = JSON.parse(r.stdout) as AgencyInitPayload;
+			return {
+				content: [{ type: "text" as const, text: formatAgencyInit(payload) }],
+				details: payload,
+			};
 		},
 	});
 
@@ -430,18 +622,17 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			"Only the Orchestrator may call agency_spawn",
 			"Prefer --reuse semantics via reuse=true when an idle instance of the role exists",
 			"Do not spawn a second Work while one is working",
-			"After agency_delegate, do not block in agency_wait — lifecycle bridge delivers reports",
+			"After agency_delegate, stay free — lifecycle bridge delivers reports",
 		],
 		parameters: Type.Object({
 			role: Type.String({ description: "Agent role id from agents.yaml (e.g. scout, brainstorm, plan)" }),
 			lifecycle: Type.Optional(StringEnum(["temporary", "persistent"] as const)),
-			name: Type.Optional(Type.String({ description: "Override instance/bus name" })),
+			name: Type.Optional(Type.String({ description: "Override specialist instance name" })),
 			direction: Type.Optional(StringEnum(["left", "right", "up", "down"] as const)),
 			reuse: Type.Optional(Type.Boolean({ description: "Reuse idle instance of role if present" })),
 			dryRun: Type.Optional(Type.Boolean()),
 			bootWaitSec: Type.Optional(Type.Number()),
 			cwd: Type.Optional(Type.String({ description: "Pane cwd (Scout reference-repo)" })),
-			nudge: Type.Optional(Type.Boolean()),
 		}),
 		async execute(_id, params, signal) {
 			const args = ["spawn", "--role", params.role];
@@ -452,11 +643,13 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.dryRun) args.push("--dry-run");
 			if (params.bootWaitSec != null) args.push("--boot-wait", String(params.bootWaitSec));
 			if (params.cwd) args.push("--cwd", params.cwd);
-			if (params.nudge === false) args.push("--no-nudge");
-			if (params.nudge === true) args.push("--nudge");
 			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_spawn failed");
-			return textResult(JSON.parse(r.stdout));
+			const payload = JSON.parse(r.stdout) as AgencySpawnPayload;
+			return {
+				content: [{ type: "text" as const, text: formatAgencySpawn(payload) }],
+				details: payload,
+			};
 		},
 	});
 
@@ -464,13 +657,13 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		name: "agency_delegate",
 		label: "Agency delegate",
 		description:
-			"Orchestrator-only: send a hybrid-bus delegate envelope and mark the instance working. Stay free after delegate — lifecycle bridge pushes/queues the report.",
-		promptSnippet: "Delegate a task to an agency specialist via the file bus",
+			"Orchestrator-only: send a broker delegate message and mark the instance working.",
+		promptSnippet: "Delegate a task to an agency specialist via the agency broker",
 		promptGuidelines: [
-			"After delegate, continue other work or wait for the pushed report — do not call agency_wait unless debugging",
+			"After delegate, continue other work or wait for the pushed report",
 		],
 		parameters: Type.Object({
-			to: Type.String({ description: "Instance / bus name" }),
+			to: Type.String({ description: "Specialist instance name" }),
 			taskId: Type.String(),
 			goal: Type.Optional(Type.String()),
 			workflowId: Type.Optional(Type.String()),
@@ -495,9 +688,43 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.outputShape) args.push("--output-shape", params.outputShape);
 			if (params.stopRules) args.push("--stop-rules", params.stopRules);
 			if (params.payloadJson) args.push("--payload-json", params.payloadJson);
-			const r = await ctl(args, signal);
+
+			const preflight = await ctl([...args, "--prepare-only"], signal);
+			if (preflight.code !== 0) throw new Error(preflight.stderr.trim() || preflight.stdout.trim() || "agency_delegate preflight failed");
+			const preflightPayload = JSON.parse(preflight.stdout) as { payload?: Record<string, unknown> };
+			const livePayload = preflightPayload.payload || {};
+
+			let brokerResult: { delivered: boolean; id?: string; reason?: string } | null = null;
+			try {
+				const msg = makeAgencyMessage({
+					kind: "delegate",
+					from: broker.sessionName || "orchestrator",
+					to: params.to,
+					taskId: params.taskId,
+					workflowId: params.workflowId,
+					payload: livePayload,
+				});
+				const delivered = await broker.send(params.to, msg);
+				brokerResult = delivered;
+			} catch (e) {
+				brokerResult = { delivered: false, reason: e instanceof Error ? e.message : String(e) };
+			}
+
+			if (!brokerResult.delivered) {
+				throw new Error(brokerResult.reason || `agency_delegate broker delivery failed for ${params.to}`);
+			}
+
+			const finalArgs = [...args, "--no-bus"];
+			const r = await ctl(finalArgs, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_delegate failed");
 			const payload = JSON.parse(r.stdout) as AgencyDelegatePayload;
+			payload.bus = {
+				...(payload.bus || {}),
+				transport: "broker",
+				delivered: brokerResult.delivered,
+				reason: brokerResult.reason,
+				id: brokerResult.id || payload.bus?.id,
+			};
 			return {
 				content: [{ type: "text" as const, text: formatAgencyDelegate(payload) }],
 				details: payload,
@@ -506,32 +733,108 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "agency_wait",
-		label: "Agency wait",
-		description:
-			"LEGACY: poll hub inbox for a taskId. Prefer lifecycle bridge push/queue. Keep only for debugging or migration.",
-		promptSnippet: "Legacy wait for an agency specialist report by taskId",
-		promptGuidelines: [
-			"Prefer lifecycle bridge delivery over agency_wait",
-			"On pane_dead: agency_list → release → spawn + delegate",
-		],
+		name: "agency_report",
+		label: "Agency report",
+		description: "Specialist-only: report task completion to the Orchestrator over the agency broker",
+		promptSnippet: "Report completed agency work to the Orchestrator",
 		parameters: Type.Object({
-			taskId: Type.String({ description: "Same taskId used in agency_delegate" }),
-			timeoutSec: Type.Optional(Type.Number({ description: "Seconds to wait (default 120)" })),
-			intervalSec: Type.Optional(Type.Number({ description: "Poll interval seconds (default 2)" })),
-			autoDoneProgress: Type.Optional(
-				Type.Boolean({ description: "Ack matching progress and keep waiting (default true)" }),
-			),
+			taskId: Type.Optional(Type.String()),
+			summary: Type.Optional(Type.String()),
+			output: Type.Optional(Type.String()),
+			payloadJson: Type.Optional(Type.String()),
 		}),
-		async execute(_id, params, signal) {
-			const args = ["wait", "--task-id", params.taskId];
-			if (params.timeoutSec != null) args.push("--timeout", String(params.timeoutSec));
-			if (params.intervalSec != null) args.push("--interval", String(params.intervalSec));
-			if (params.autoDoneProgress === false) args.push("--no-auto-done-progress");
-			if (params.autoDoneProgress === true) args.push("--auto-done-progress");
-			const r = await ctl(args, signal);
-			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_wait failed");
-			return textResult(JSON.parse(r.stdout));
+		async execute(_id, params) {
+			const payload = params.payloadJson
+				? JSON.parse(params.payloadJson) as Record<string, unknown>
+				: { summary: params.summary, output: params.output };
+			const message = makeAgencyMessage({
+				kind: "report",
+				from: broker.sessionName || "specialist",
+				to: "orchestrator",
+				taskId: params.taskId,
+				payload,
+			});
+			const result = await broker.send("orchestrator", message);
+			if (!result.delivered) throw new Error(result.reason || "agency_report not delivered");
+			return { content: [{ type: "text" as const, text: `Agency report delivered to orchestrator (${result.id})` }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: "agency_progress",
+		label: "Agency progress",
+		description: "Specialist-only: send non-terminal progress to the Orchestrator over the agency broker",
+		promptSnippet: "Send agency progress to the Orchestrator",
+		parameters: Type.Object({
+			taskId: Type.Optional(Type.String()),
+			message: Type.String(),
+			payloadJson: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params) {
+			const payload = params.payloadJson ? JSON.parse(params.payloadJson) as Record<string, unknown> : { message: params.message };
+			const message = makeAgencyMessage({
+				kind: "progress",
+				from: broker.sessionName || "specialist",
+				to: "orchestrator",
+				taskId: params.taskId,
+				payload,
+			});
+			const result = await broker.send("orchestrator", message);
+			if (!result.delivered) throw new Error(result.reason || "agency_progress not delivered");
+			return { content: [{ type: "text" as const, text: `Agency progress delivered to orchestrator (${result.id})` }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: "agency_ask",
+		label: "Agency ask",
+		description: "Specialist-only: ask the Orchestrator a blocking question over the agency broker and wait for a correlated reply",
+		promptSnippet: "Ask the Orchestrator a blocking agency question",
+		parameters: Type.Object({
+			taskId: Type.Optional(Type.String()),
+			question: Type.String(),
+			timeoutMs: Type.Optional(Type.Number()),
+		}),
+		async execute(_id, params) {
+			const message = makeAgencyMessage({
+				kind: "ask",
+				from: broker.sessionName || "specialist",
+				to: "orchestrator",
+				taskId: params.taskId,
+				expectsReply: true,
+				payload: { message: params.question },
+			});
+			const reply = await broker.ask("orchestrator", message, params.timeoutMs);
+			const body = typeof reply.payload === "object" && reply.payload !== null && "message" in reply.payload
+				? String((reply.payload as { message?: unknown }).message)
+				: JSON.stringify(reply.payload);
+			return { content: [{ type: "text" as const, text: `**Agency reply:**\n${body}` }], details: reply };
+		},
+	});
+
+	pi.registerTool({
+		name: "agency_reply",
+		label: "Agency reply",
+		description: "Orchestrator-only: reply to a specialist agency_ask using the ask's Reply-To id",
+		promptSnippet: "Reply to a specialist agency ask",
+		parameters: Type.Object({
+			to: Type.String({ description: "Specialist instance name" }),
+			replyTo: Type.String({ description: "Ask message id from the inbound agency ask" }),
+			message: Type.String(),
+			taskId: Type.Optional(Type.String()),
+		}),
+		async execute(_id, params) {
+			const reply = makeAgencyMessage({
+				kind: "reply",
+				from: broker.sessionName || "orchestrator",
+				to: params.to,
+				taskId: params.taskId,
+				replyTo: params.replyTo,
+				payload: { message: params.message },
+			});
+			const result = await broker.send(params.to, reply);
+			if (!result.delivered) throw new Error(result.reason || "agency_reply not delivered");
+			return { content: [{ type: "text" as const, text: `Agency reply delivered to ${params.to}` }], details: result };
 		},
 	});
 
@@ -554,7 +857,11 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.force) args.push("--force");
 			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_release failed");
-			return textResult(JSON.parse(r.stdout));
+			const payload = JSON.parse(r.stdout) as AgencyReleasePayload;
+			return {
+				content: [{ type: "text" as const, text: formatAgencyRelease(payload) }],
+				details: payload,
+			};
 		},
 	});
 }

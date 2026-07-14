@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Multi-Agency hybrid bus CLI — see .pi/agency/bus-spec.md"""
+"""Multi-Agency legacy file-bus CLI — see .pi/agency/bus-spec.md"""
 
 from __future__ import annotations
 

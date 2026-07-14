@@ -78,7 +78,14 @@ def test_dry_run_creates_idle_row(spawn_env: Path):
     assert len(data["instances"]) == 1
 
 
-def test_bootstrap_exports_package_script_paths(spawn_env: Path):
+def test_spawn_nudge_is_noop_compatibility_arg():
+    assert asp.spawn_specialist.__kwdefaults__["nudge"] is False
+    text = asp.bootstrap_text("work", None, ".pi/agency/charters/work.md", None, "/tmp/agency")
+    assert "nudge" not in text.lower()
+    assert "$BUS" not in text
+
+
+def test_bootstrap_uses_broker_tools_only(spawn_env: Path):
     text = asp.bootstrap_text(
         "work",
         None,
@@ -87,11 +94,12 @@ def test_bootstrap_exports_package_script_paths(spawn_env: Path):
         str(spawn_env),
     )
     assert f'export AGENCY_ROOT="{spawn_env}"' in text
-    assert f'export BUS="{asp.scripts_dir() / "bus.py"}"' in text
+    assert 'export BUS=' not in text
     assert f'export MEMORY="{asp.scripts_dir() / "memory.py"}"' in text
-    assert 'python3 "$BUS" recv --as work --wait 60 --interval 2' in text
-    assert "Use only $BUS/$MEMORY" in text
-    assert "never call .pi/agency/scripts" in text
+    assert 'python3 "$BUS" recv --as work --wait 60 --interval 2' not in text
+    assert "agency_report / agency_ask / agency_progress" in text
+    assert "$BUS" not in text
+    assert "fallback" not in text.lower()
 
 
 def test_packaged_prompts_do_not_recommend_project_script_paths():

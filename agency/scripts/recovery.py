@@ -178,8 +178,8 @@ def nudge_instance(ctl: Any, inst: dict[str, Any], task_id: str) -> dict[str, An
     if not surface:
         return {"ok": False, "error": "no cmuxSurface"}
     body = (
-        f"Lifecycle bridge: you settled without a bus report/ask for taskId={task_id}. "
-        f"Immediately send a report (or ask) to orchestrator via the hybrid bus. "
+        f"Lifecycle bridge: you settled without a broker report/ask for taskId={task_id}. "
+        f"Immediately send a report (or ask) to orchestrator via agency_report or agency_ask. "
         f"Do not go idle again without reporting."
     )
     try:

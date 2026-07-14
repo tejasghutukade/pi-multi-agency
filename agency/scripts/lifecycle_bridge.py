@@ -21,7 +21,11 @@ from hub_delivery import (  # noqa: E402
     ack_delivery,
     claim_for_delivery,
 )
-from ledger import find_by_surface  # noqa: E402
+from ledger import find_by_surface, find_instance, load_sessions, save_sessions  # noqa: E402
+from specialist_delivery import (  # noqa: E402
+    claim_for_specialist_delivery,
+    pending_for_specialist,
+)
 
 # draft timers from docs/architecture.md
 SILENT_SETTLE_GRACE_SEC = 60
@@ -165,6 +169,39 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_broker_ack(args: argparse.Namespace) -> int:
+    ctl = import_ctl()
+    root = ctl.agency_root()
+    data = load_sessions(root)
+    frm = args.from_name
+    typ = args.type
+    task_id = args.task_id
+    inst = find_instance(data, frm) if frm else None
+    if inst and typ == "report" and (not task_id or inst.get("taskId") == task_id):
+        inst["taskId"] = None
+        inst["silentSettleAt"] = None
+        inst["nudgeCount"] = 0
+        inst["awaitingStartAfterNudge"] = False
+        inst["lastDelegate"] = None
+        inst["updatedAt"] = utc_now()
+        save_sessions(root, data)
+    elif inst and typ == "ask":
+        inst["updatedAt"] = utc_now()
+        save_sessions(root, data)
+    from agency_events import emit
+
+    emit(
+        "broker.delivery.acked",
+        root=root,
+        instance=HUB,
+        taskId=task_id,
+        envelopeType=typ,
+        fromName=frm,
+    )
+    print(json.dumps({"ok": True, "action": "broker-ack", "from": frm, "type": typ, "taskId": task_id}, indent=2))
+    return 0
+
+
 def cmd_pending_hub(_args: argparse.Namespace) -> int:
     ctl = import_ctl()
     root = ctl.agency_root()
@@ -188,6 +225,39 @@ def cmd_pending_hub(_args: argparse.Namespace) -> int:
             indent=2,
         )
     )
+    return 0
+
+
+def _resolve_instance_name(ctl: Any, data: dict[str, Any], explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    surface, _ = ctl.caller_surface()
+    inst = find_by_surface(data, surface)
+    name = (inst or {}).get("intercomName")
+    if not name:
+        raise RuntimeError("could not resolve instance name (pass --name)")
+    return str(name)
+
+
+def cmd_pending_specialist(args: argparse.Namespace) -> int:
+    ctl = import_ctl()
+    root = ctl.agency_root()
+    data = ctl.load_sessions(root)
+    name = _resolve_instance_name(ctl, data, getattr(args, "name", None))
+    out = pending_for_specialist(root, name=name)
+    out["instance"] = name
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def cmd_claim_specialist(args: argparse.Namespace) -> int:
+    ctl = import_ctl()
+    root = ctl.agency_root()
+    data = ctl.load_sessions(root)
+    name = _resolve_instance_name(ctl, data, getattr(args, "name", None))
+    out = claim_for_specialist_delivery(root, name=name, task_id=getattr(args, "task_id", None))
+    out["instance"] = name
+    print(json.dumps(out, indent=2))
     return 0
 
 
@@ -228,7 +298,19 @@ def main() -> int:
     st.add_argument("--name")
     st.add_argument("--status", required=True, choices=["working", "idle", "interrupted", "failed"])
 
+    ba = sub.add_parser("broker-ack", help="Ack a live broker delivery and update ledger")
+    ba.add_argument("--from", dest="from_name", required=True)
+    ba.add_argument("--type", required=True, choices=["report", "ask", "progress", "reply", "delegate", "release"])
+    ba.add_argument("--task-id")
+
     sub.add_parser("pending-hub", help="List pending hub report/ask envelopes")
+
+    ps = sub.add_parser("pending-specialist", help="List pending specialist delegate/reply envelopes")
+    ps.add_argument("--name")
+
+    cs = sub.add_parser("claim-specialist", help="Claim one pending specialist delegate/reply for follow-up delivery")
+    cs.add_argument("--name")
+    cs.add_argument("--task-id")
 
     cl = sub.add_parser("claim-delivery", help="Claim one pending hub message for push")
     cl.add_argument("--task-id")
@@ -260,8 +342,14 @@ def main() -> int:
             return cmd_whoami(args)
         if args.cmd == "status":
             return cmd_status(args)
+        if args.cmd == "broker-ack":
+            return cmd_broker_ack(args)
         if args.cmd == "pending-hub":
             return cmd_pending_hub(args)
+        if args.cmd == "pending-specialist":
+            return cmd_pending_specialist(args)
+        if args.cmd == "claim-specialist":
+            return cmd_claim_specialist(args)
         if args.cmd == "claim-delivery":
             return cmd_claim_for_delivery(args)
         if args.cmd == "ack-delivery":

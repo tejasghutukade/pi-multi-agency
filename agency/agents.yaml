@@ -9,7 +9,7 @@ orchestrator:
   intercomName: orchestrator
   lifecycleDefault: persistent
   # Hub lock: no edit/write/bash — start with --tools matching agents/orchestrator.md frontmatter
-  tools: read,grep,find,ls,agency_init,agency_list,agency_spawn,agency_delegate,agency_wait,agency_release
+  tools: read,grep,find,ls,agency_init,agency_list,agency_spawn,agency_delegate,agency_release
 
 agents:
   scout:

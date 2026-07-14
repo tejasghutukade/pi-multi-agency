@@ -1,6 +1,6 @@
-# Hybrid Message Bus Spec (v0)
+# Agency Message Transport Spec (v1)
 
-Filesystem envelopes for content; cmux notify for attention. Specialists **poll** their inbox. Hub completion UX is the **lifecycle bridge** (push/queue into the Orchestrator chat) — not blocking `agency_wait`.
+Live agency traffic is broker-primary: each Pi pane registers with the Multi-Agency broker and sends `delegate`, `report`, `ask`, `reply`, `progress`, and `release` messages over a local socket with delivered/failed acknowledgement. Filesystem envelopes remain as compatibility, fallback, and audit. Specialists should use `agency_report`, `agency_ask`, and `agency_progress`; `$BUS` polling is only for legacy fallback files.
 
 ## Layout
 
@@ -21,7 +21,7 @@ Filesystem envelopes for content; cmux notify for attention. Specialists **poll*
 
 - Inbox folder name = **instance name** from `sessions.json` (`plan`, `scout-t8785`, `orchestrator`).
 - Always write new messages into `pending/` using atomic create (`*.tmp` → rename to `*.json`).
-- Receiver moves `pending → processing` when claimed, then `processing → done` when handled (or delete after archive to outbox).
+- Receiver moves `pending → processing` when claimed, then `processing → done` when handled (or delete after archive to outbox). This state machine applies to fallback files only; live broker messages are delivered directly and do not enter `processing/`.
 
 ## Scripts location
 
@@ -33,6 +33,7 @@ export AGENCY_PROJECT_ROOT="$PWD"
 export BUS="/path/to/multi-agency/agency/scripts/bus.py"
 export MEMORY="/path/to/multi-agency/agency/scripts/memory.py"
 # or: absolute paths printed in specialist boot / /agency-hub
+# fallback only, after broker delivery fails or no live delegate appears
 python3 "$BUS" recv --as <instanceName> --wait 60 --interval 2
 ```
 
