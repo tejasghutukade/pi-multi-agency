@@ -68,17 +68,16 @@ def bootstrap_text(
     skill_resolved = resolve_resource(skill) if skill else None
     skill_disp = str(skill_resolved) if skill_resolved else skill
     skill_line = f"On each delegate, also read skillPath: {skill_disp}." if skill_disp else ""
-    bus = str(scripts_dir() / "bus.py")
     memory = str(scripts_dir() / "memory.py")
     return (
         f"{persona} {skill_line} "
-        f"Your bus instance name is {instance_name}. "
+        f"Your broker instance name is {instance_name}. "
         f'export AGENCY_ROOT="{agency_export}"; '
-        f'export BUS="{bus}"; '
         f'export MEMORY="{memory}"; '
-        "Use only $BUS/$MEMORY for agency scripts; never call .pi/agency/scripts/… directly. "
-        f"Immediately run: python3 \"$BUS\" recv --as {instance_name} --wait 60 --interval 2 "
-        "and process any pending delegate (report/ask to orchestrator, then bus done). "
+        "Use agency_report / agency_ask / agency_progress for all agency messages. "
+        "Prefer built-in tools (read, grep, find, ls) over bash for read-only exploration; "
+        "use bash only when no built-in tool can do the job. "
+        "Wait for broker-injected delegates/replies in this Pi session. "
         "Do not wait for another human message. Do not talk to the end user."
     )
 
@@ -93,13 +92,13 @@ def spawn_specialist(
     dry_run: bool = False,
     boot_wait: float = 5.0,
     cwd: str | None = None,
-    nudge: bool = True,
+    nudge: bool = False,
     recovery: bool = False,
     message: str | None = None,
 ) -> dict[str, Any]:
     """Open (or reuse) a specialist pane and boot pi. Must run inside cmux.
 
-    If `message` is set, it replaces the default bus-recv boot prompt.
+    If `message` is set, it replaces the default broker boot prompt.
     """
     ctl = _ctl()
     root = agency_root()
@@ -259,25 +258,6 @@ def spawn_specialist(
         save_sessions(root, data)
         raise RuntimeError(f"cmux send pi failed: {e}") from e
 
-    nudged = False
-    if nudge and boot_wait > 0:
-        time.sleep(boot_wait)
-        bus = str(scripts_dir() / "bus.py")
-        memory = str(scripts_dir() / "memory.py")
-        nudge_body = (
-            f'If idle: export AGENCY_ROOT="{agency_export}"; '
-            f'export BUS="{bus}"; '
-            f'export MEMORY="{memory}"; '
-            f'python3 "$BUS" recv --as {instance_name} '
-            f"--wait 60 --interval 2; process any delegate now. "
-            "Use only $BUS/$MEMORY for agency scripts."
-        )
-        try:
-            send_to_surface(surface, nudge_body)
-            nudged = True
-        except RuntimeError:
-            nudged = False
-
     row["status"] = "idle"
     row["updatedAt"] = utc_now()
     save_sessions(root, data)
@@ -287,7 +267,6 @@ def spawn_specialist(
         "instance": row,
         "bootWaitSec": boot_wait,
         "bootPromptPath": str(boot_path),
-        "nudged": nudged,
         "piCommand": pi_cmd,
     }
 
@@ -308,14 +287,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--message",
         "-m",
-        help="Custom first-turn boot message (replaces default bus-recv prompt)",
+        help="Custom first-turn boot message",
     )
-    p.add_argument(
-        "--nudge",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="After boot-wait, send one fallback kick to start bus poll (default: true)",
-    )
+    p.add_argument("--nudge", action=argparse.BooleanOptionalAction, default=False, help=argparse.SUPPRESS)
     p.add_argument(
         "--recovery",
         action="store_true",
@@ -332,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             boot_wait=args.boot_wait,
             cwd=args.cwd,
-            nudge=args.nudge,
+            nudge=False,
             recovery=args.recovery,
             message=args.message,
         )

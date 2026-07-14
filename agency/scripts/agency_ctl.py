@@ -58,7 +58,7 @@ STARTING_TIMEOUT_SEC = 90
 # Hub process allowlist: read/search + agency_* — no edit/write/bash (see docs/architecture.md).
 HUB_TOOLS = (
     "read,grep,find,ls,"
-    "agency_init,agency_list,agency_spawn,agency_delegate,agency_wait,agency_release"
+    "agency_init,agency_list,agency_spawn,agency_delegate,agency_release"
 )
 
 
@@ -295,7 +295,7 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         dry_run=bool(args.dry_run),
         boot_wait=float(args.boot_wait),
         cwd=args.cwd,
-        nudge=bool(args.nudge),
+        nudge=False,
         recovery=bool(getattr(args, "recovery", False)),
         message=getattr(args, "message", None),
     )
@@ -332,19 +332,37 @@ def cmd_delegate(args: argparse.Namespace) -> int:
         }
         payload = {k: v for k, v in payload.items() if v is not None}
 
-    inst["status"] = "working"
+    if getattr(args, "prepare_only", False):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "delegate-preflight",
+                    "to": args.to,
+                    "taskId": args.task_id,
+                    "payload": payload,
+                    "instance": inst,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    now = utc_now()
+    # Process status is lifecycle-owned (agent_start/agent_settled).
+    # Delegate mutates task routing metadata only.
     inst["taskId"] = args.task_id
     inst["nudgeCount"] = 0
-    inst["silentSettleAt"] = None
+    inst["silentSettleAt"] = now
     inst["awaitingStartAfterNudge"] = False
     inst["lastDelegate"] = {
         "taskId": args.task_id,
         "workflowId": args.workflow_id,
         "payload": payload,
         "to": args.to,
-        "at": utc_now(),
+        "at": now,
     }
-    inst["updatedAt"] = utc_now()
+    inst["updatedAt"] = now
     save_sessions(root, data)
 
     bus_args = [
@@ -362,7 +380,17 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     ]
     if args.workflow_id:
         bus_args.extend(["--workflow-id", args.workflow_id])
-    result = bus_run(root, bus_args)
+    if getattr(args, "no_bus", False):
+        result = {
+            "ok": True,
+            "transport": "broker",
+            "delivered": True,
+            "notified": False,
+        }
+    else:
+        result = bus_run(root, bus_args)
+        result["transport"] = result.get("transport") or "file"
+
     print(
         json.dumps(
             {
@@ -387,24 +415,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     kit = kit_root()
     pkg = package_root()
 
-    if agency.exists() and not args.force:
-        if (agency / "agents.yaml").exists() and (agency / "sessions.json").exists():
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "action": "init",
-                        "skipped": True,
-                        "reason": "already initialized (pass --force to refresh templates)",
-                        "agencyRoot": str(agency),
-                        "projectRoot": str(proj),
-                        "packageRoot": str(pkg),
-                    },
-                    indent=2,
-                )
-            )
-            return 0
-
     agency.mkdir(parents=True, exist_ok=True)
     agents_dir.mkdir(parents=True, exist_ok=True)
 
@@ -421,32 +431,42 @@ def cmd_init(args: argparse.Namespace) -> int:
         shutil.copytree(src, dest)
         copied.append(str(dest.relative_to(proj)) + "/")
 
-    copy_file(kit / "agents.yaml", agency / "agents.yaml")
-    copy_file(kit / "bus-spec.md", agency / "bus-spec.md")
-    copy_file(kit / "memory-spec.md", agency / "memory-spec.md")
-    copy_tree(kit / "charters", agency / "charters")
-
+    # Always refresh persona files from the package kit so template fixes
+    # (e.g. added agency_report/agency_ask/agency_progress tools) propagate
+    # to existing projects without a manual --force re-init. State
+    # (sessions.json) and config (agents.yaml) are never overwritten here.
     for md in (pkg / "agents").glob("*.md"):
         copy_file(md, agents_dir / md.name)
+
+    if (
+        (agency / "agents.yaml").exists()
+        and (agency / "sessions.json").exists()
+        and not args.force
+    ):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "init",
+                    "skipped": True,
+                    "reason": "already initialized (persona files refreshed from kit; pass --force to refresh templates/config)",
+                    "agencyRoot": str(agency),
+                    "projectRoot": str(proj),
+                    "packageRoot": str(pkg),
+                    "refreshed": copied,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    copy_file(kit / "agents.yaml", agency / "agents.yaml")
+    copy_file(kit / "memory-spec.md", agency / "memory-spec.md")
+    copy_tree(kit / "charters", agency / "charters")
 
     sessions = agency / "sessions.json"
     if not sessions.exists() or args.force:
         copy_file(kit / "templates" / "sessions.json", sessions)
-
-    (agency / ".package-root").write_text(str(pkg) + "\n")
-    copied.append(".pi/agency/.package-root")
-
-    env = os.environ.copy()
-    env["AGENCY_ROOT"] = str(agency)
-    env["AGENCY_PROJECT_ROOT"] = str(proj)
-    subprocess.run(
-        [sys.executable, str(bus_py()), "init", HUB],
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=str(proj),
-    )
 
     print(
         json.dumps(
@@ -575,14 +595,9 @@ def main() -> int:
     sp.add_argument(
         "--message",
         "-m",
-        help="Custom first-turn boot message (replaces default bus-recv prompt)",
+        help="Custom first-turn boot message",
     )
-    sp.add_argument(
-        "--nudge",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="After boot-wait, send one fallback kick to start bus poll (default: true)",
-    )
+    sp.add_argument("--nudge", action=argparse.BooleanOptionalAction, default=False, help=argparse.SUPPRESS)
     sp.add_argument(
         "--recovery",
         action="store_true",
@@ -602,6 +617,8 @@ def main() -> int:
     d.add_argument("--output-shape")
     d.add_argument("--stop-rules")
     d.add_argument("--payload-json")
+    d.add_argument("--no-bus", action="store_true", help="Commit delegate metadata only; live broker already delivered")
+    d.add_argument("--prepare-only", action="store_true", help="Validate target and return resolved payload without mutating ledger or bus")
     d.add_argument(
         "--recovery",
         action="store_true",

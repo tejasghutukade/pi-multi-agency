@@ -9,3 +9,14 @@ License: MIT (vendor/compound-engineering/LICENSE)
 Copyright (c) 2025 Every
 
 Only the skill trees required by Multi-Agency agents.yaml are vendored.
+
+pi-intercom broker patterns (adapted source)
+--------------------------------------------
+Location: extensions/multi-agency/broker/
+Upstream: https://github.com/nicobailon/pi-intercom
+License: MIT
+Copyright (c) 2026 Nico Bailon
+
+The agency broker adapts pi-intercom's local IPC framing, broker spawn lock,
+health check, client pending-send handling, session presence, and ask/reply edge
+tracking for the Multi-Agency transport protocol.

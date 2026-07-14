@@ -39,10 +39,16 @@
       "./skills"
     ]
   },
+  "scripts": {
+    "test:broker": "tsx --test extensions/multi-agency/test/*.test.ts"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
+  },
+  "dependencies": {
+    "tsx": "^4.20.0"
   },
   "engines": {
     "node": ">=20"

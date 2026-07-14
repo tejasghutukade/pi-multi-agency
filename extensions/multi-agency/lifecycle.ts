@@ -3,11 +3,14 @@
  * Process truth: agent_start / agent_settled → sessions.json
  * Task truth: bus report/ask
  * Hub: push full message when idle; queue banner when busy
- * Specialist: silent settle → one nudge → abandon if no agent_start
+ * Specialist: auto-pull delegate/reply from bus + silent settle guard (nudge → abandon)
  * Temporary: agent_settled starts 5m idle timer; agent_start cancels; idle → auto-teardown
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgencyBrokerRuntime } from "./broker-runtime.ts";
+import type { AgencyMessage, AgencySessionInfo } from "./broker/types.ts";
+import { formatInboundAgencyMessage } from "./messages.ts";
 
 export type CtlRunner = (
 	args: string[],
@@ -47,6 +50,8 @@ type TickResult = {
 type ClaimResult = {
 	ok?: boolean;
 	empty?: boolean;
+	blocked?: string;
+	replay?: boolean;
 	path?: string;
 	text?: string;
 	envelope?: { from?: string; taskId?: string; type?: string };
@@ -60,7 +65,7 @@ function parseJson<T>(raw: string): T | null {
 	}
 }
 
-export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): void {
+export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner, broker?: AgencyBrokerRuntime): void {
 	let identity: Whoami | null = null;
 	let processBusy = false;
 	let settleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -69,7 +74,9 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 	let specialistTickTimer: ReturnType<typeof setInterval> | null = null;
 	let delivering = false;
 	let tearingDown = false;
+	let lastSpecialistDeliveryPath: string | null = null;
 	let lastUi: ExtensionContext["ui"] | null = null;
+	const brokerQueue: Array<{ from: AgencySessionInfo; message: AgencyMessage }> = [];
 
 	const clearSettleTimer = () => {
 		if (settleTimer) {
@@ -143,9 +150,12 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		const args = ["status", "--status", status];
 		if (name) args.push("--name", name);
 		try {
-			await lifecycle(args);
+			const out = (await lifecycle(args)) as Whoami;
+			if (out?.instance) identity = { ...(identity || {}), instance: out.instance };
+			broker?.updatePresence(identity, status);
 		} catch {
 			/* pane may not be claimed yet */
+			broker?.updatePresence(identity, status);
 		}
 	};
 
@@ -182,6 +192,63 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 			void runTempIdleTeardown();
 		}, TEMP_IDLE_TEARDOWN_MS);
 	};
+
+	const setBrokerBanner = () => {
+		if (!lastUi?.setStatus) return;
+		if (!brokerQueue.length) {
+			lastUi.setStatus("agency-broker-queue", undefined);
+			return;
+		}
+		const from = brokerQueue.map((m) => m.message.from || m.from.name || "?").slice(0, 3).join(", ");
+		lastUi.setStatus(
+			"agency-broker-queue",
+			processBusy
+				? `Queued ${brokerQueue.length} broker message(s) from ${from || "agency"} — delivers when idle`
+				: `Delivering ${brokerQueue.length} broker message(s)…`,
+		);
+	};
+
+	const ackBrokerInbound = async (message: AgencyMessage) => {
+		if (!identity?.isHub) return;
+		if (message.kind !== "report" && message.kind !== "ask") return;
+		try {
+			const args = ["broker-ack", "--from", message.from, "--type", message.kind];
+			if (message.taskId) args.push("--task-id", message.taskId);
+			await lifecycle(args);
+		} catch {
+			/* ack is best-effort; live delivery already reached the hub */
+		}
+	};
+
+	const deliverBrokerMessage = async (entry: { from: AgencySessionInfo; message: AgencyMessage }) => {
+		const text = formatInboundAgencyMessage(entry.message);
+		try {
+			pi.sendUserMessage(text, { deliverAs: "followUp" });
+			await ackBrokerInbound(entry.message);
+		} catch (e) {
+			lastUi?.notify?.(`agency broker delivery failed: ${String(e)}`, "error");
+		}
+	};
+
+	const drainBrokerQueue = async () => {
+		if (processBusy || delivering) return;
+		while (!processBusy && brokerQueue.length) {
+			const entry = brokerQueue.shift();
+			if (entry) await deliverBrokerMessage(entry);
+		}
+		setBrokerBanner();
+	};
+
+	const handleBrokerInbound = async (from: AgencySessionInfo, message: AgencyMessage) => {
+		if (processBusy) {
+			brokerQueue.push({ from, message });
+			setBrokerBanner();
+			return;
+		}
+		await deliverBrokerMessage({ from, message });
+	};
+
+	broker?.onMessage((from, message) => void handleBrokerInbound(from, message));
 
 	const drainHubQueue = async () => {
 		if (delivering || processBusy) return;
@@ -229,6 +296,7 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		if (processBusy || tearingDown) return;
 		const name = identity?.instance?.intercomName;
 		if (!name) return;
+
 		try {
 			const tick = (await lifecycle(["tick", "--name", name])) as TickResult;
 			if (tick.status === "abandon") {
@@ -245,16 +313,34 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 					`Abandoned ${name} after silent settle; respawned + re-delegated`,
 					"warning",
 				);
-			} else if (tick.status === "nudged") {
+				return;
+			}
+			if (tick.status === "nudged") {
 				lastUi?.notify?.(`Silent-settle nudge sent to ${name}`, "info");
 			}
 		} catch {
 			/* ignore */
 		}
+
+		try {
+			const claim = (await lifecycle(["claim-specialist", "--name", name])) as ClaimResult;
+			if (!claim || claim.empty || !claim.text || !claim.path) {
+				if (!claim?.path) lastSpecialistDeliveryPath = null;
+				return;
+			}
+			if (claim.path === lastSpecialistDeliveryPath) return;
+			lastSpecialistDeliveryPath = claim.path;
+			pi.sendUserMessage(claim.text, { deliverAs: "followUp" });
+		} catch {
+			/* ignore transient */
+		}
 	};
 
 	const startLoops = async () => {
 		await refreshIdentity();
+		void broker?.ensureConnected(identity, lastUi).catch((e) => {
+			lastUi?.setStatus?.("agency-broker", `agency broker unavailable — file fallback active: ${String(e)}`);
+		});
 		if (identity?.isHub) {
 			if (!hubPollTimer) {
 				hubPollTimer = setInterval(() => void pollHubPending(), HUB_POLL_MS);
@@ -278,7 +364,12 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		if (specialistTickTimer) clearInterval(specialistTickTimer);
 		hubPollTimer = null;
 		specialistTickTimer = null;
+		lastSpecialistDeliveryPath = null;
+		brokerQueue.splice(0, brokerQueue.length);
+		void broker?.disconnect();
 		lastUi?.setStatus?.("agency-queue", undefined);
+		lastUi?.setStatus?.("agency-broker", undefined);
+		lastUi?.setStatus?.("agency-broker-queue", undefined);
 		lastUi?.setStatus?.("agency-temp-idle", undefined);
 	});
 
@@ -290,6 +381,7 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		setTempIdleBanner(false);
 		if (!identity?.instance) await refreshIdentity();
 		await markStatus("working");
+		void broker?.ensureConnected(identity, lastUi).catch(() => undefined);
 		if (identity?.isHub) void pollHubPending();
 	});
 
@@ -298,6 +390,8 @@ export function installLifecycleBridge(pi: ExtensionAPI, runCtl: CtlRunner): voi
 		processBusy = false;
 		if (!identity?.instance) await refreshIdentity();
 		await markStatus("idle");
+		void broker?.ensureConnected(identity, lastUi).catch(() => undefined);
+		if (brokerQueue.length) void drainBrokerQueue();
 		if (identity?.isHub) {
 			clearSettleTimer();
 			settleTimer = setTimeout(() => {

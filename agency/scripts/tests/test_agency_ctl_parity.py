@@ -30,7 +30,7 @@ def test_public_subcommands_registered():
 
 def test_tool_flags_accepted_by_spawn_help():
     src = Path(ctl.__file__).read_text()
-    for flag in ("--role", "--lifecycle", "--reuse", "--dry-run", "--boot-wait", "--cwd", "--nudge", "--recovery"):
+    for flag in ("--role", "--lifecycle", "--reuse", "--dry-run", "--boot-wait", "--cwd", "--recovery"):
         assert flag in src or flag.replace("--", "") in Path(
             Path(ctl.__file__).parent / "agent_spawn.py"
         ).read_text()
@@ -61,3 +61,10 @@ def test_specialist_and_agent_spawn_same():
 def test_release_uses_clear_instance_helper():
     src = Path(ctl.__file__).read_text()
     assert "clear_instance" in src
+
+
+def test_delegate_supports_broker_preflight_and_no_bus_commit():
+    src = Path(ctl.__file__).read_text()
+    assert "--prepare-only" in src
+    assert "delegate-preflight" in src
+    assert "--no-bus" in src
