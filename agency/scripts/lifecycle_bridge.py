@@ -18,6 +18,11 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from cmux_pane import close_surface, send_to_surface  # noqa: E402
+from hub_delivery import (  # noqa: E402
+    ack_delivery,
+    claim_for_delivery,
+    format_delivery_text,
+)
 from ledger import find_by_surface  # noqa: E402
 
 # draft timers from docs/architecture.md
@@ -292,99 +297,19 @@ def cmd_pending_hub(_args: argparse.Namespace) -> int:
     return 0
 
 
-def format_delivery_text(env: dict[str, Any]) -> str:
-    typ = env.get("type") or "message"
-    frm = env.get("from") or "specialist"
-    task = env.get("taskId") or "?"
-    payload = env.get("payload")
-    path = env.get("payloadPath")
-    lines = [
-        f"[agency:{typ}] from `{frm}` · taskId `{task}`",
-        "",
-        "A specialist bus message was delivered by the lifecycle bridge. Act on it (synthesize, reply, or continue the workflow). Do not re-implement the specialist work.",
-        "",
-    ]
-    if isinstance(payload, dict):
-        lines.append("```json")
-        lines.append(json.dumps(payload, indent=2)[:12000])
-        lines.append("```")
-    elif payload is not None:
-        lines.append(str(payload)[:12000])
-    if path:
-        lines.append(f"\npayloadPath: {path}")
-    return "\n".join(lines)
-
-
 def cmd_claim_for_delivery(args: argparse.Namespace) -> int:
-    """Claim oldest pending hub report/ask → processing and return formatted text."""
-    ctl = import_ctl()
-    root = ctl.agency_root()
-    ensure = root / "inbox" / HUB / "pending"
-    ensure.mkdir(parents=True, exist_ok=True)
-    pending = sorted(p for p in ensure.glob("*.json") if p.is_file())
-    chosen: Path | None = None
-    env: dict[str, Any] | None = None
-    for p in pending:
-        try:
-            peek = json.loads(p.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if peek.get("type") not in ("report", "ask"):
-            continue
-        if args.task_id and peek.get("taskId") != args.task_id:
-            continue
-        chosen = p
-        env = peek
-        break
-    if not chosen or env is None:
-        print(json.dumps({"ok": True, "empty": True}))
-        return 0
-    processing = root / "inbox" / HUB / "processing" / chosen.name
-    chosen.replace(processing)
-    text = format_delivery_text(env)
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "empty": False,
-                "path": str(processing),
-                "envelope": env,
-                "text": text,
-            },
-            indent=2,
-        )
-    )
+    from agency_paths import agency_root as ar
+
+    result = claim_for_delivery(ar(), task_id=getattr(args, "task_id", None))
+    print(json.dumps(result, indent=2))
     return 0
 
 
 def cmd_ack_delivery(args: argparse.Namespace) -> int:
-    ctl = import_ctl()
-    root = ctl.agency_root()
-    path = Path(args.path)
-    if not path.is_file():
-        raise RuntimeError(f"missing {path}")
-    dest = root / "inbox" / HUB / "done" / path.name
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    path.replace(dest)
-    # clear taskId on source instance if report
-    try:
-        env = json.loads(dest.read_text())
-    except (OSError, json.JSONDecodeError):
-        env = {}
-    data = ctl.load_sessions(root)
-    frm = env.get("from")
-    if frm and env.get("type") in ("report", "ask"):
-        inst = ctl.find_instance(data, frm)
-        if inst and inst.get("taskId") == env.get("taskId"):
-            if env.get("type") == "report":
-                inst["taskId"] = None
-                inst["silentSettleAt"] = None
-                inst["nudgeCount"] = 0
-                inst["awaitingStartAfterNudge"] = False
-                inst["lastDelegate"] = None
-            inst["updatedAt"] = utc_now()
-            ctl.save_sessions(root, data)
-    print(json.dumps({"ok": True, "done": str(dest)}, indent=2))
+    from agency_paths import agency_root as ar
+
+    result = ack_delivery(ar(), Path(args.path))
+    print(json.dumps(result, indent=2))
     return 0
 
 
