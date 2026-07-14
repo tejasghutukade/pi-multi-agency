@@ -74,6 +74,8 @@ def bootstrap_text(
         f"Your broker instance name is {instance_name}. "
         f'export AGENCY_ROOT="{agency_export}"; '
         f'export MEMORY="{memory}"; '
+        "All agency messages go through the agency_report / agency_ask / agency_progress tools — "
+        "do NOT call bus.py or any bus script directly. "
         "Use agency_report / agency_ask / agency_progress for all agency messages. "
         "Prefer built-in tools (read, grep, find, ls) over bash for read-only exploration; "
         "use bash only when no built-in tool can do the job. "
