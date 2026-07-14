@@ -10,11 +10,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from cmux_pane import tree_text  # noqa: E402
 
 
 def agency_root() -> Path:
@@ -35,27 +39,7 @@ def save_sessions(path: Path, data: dict) -> None:
 
 
 def cmux_tree_text() -> str:
-    cmux = shutil.which("cmux")
-    if not cmux:
-        for c in (
-            Path.home() / "bin" / "cmux",
-            Path("/Applications/cmux.app/Contents/Resources/bin/cmux"),
-        ):
-            if c.exists():
-                cmux = str(c)
-                break
-    if not cmux:
-        return ""
-    try:
-        r = subprocess.run(
-            [cmux, "tree", "--all"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return (r.stdout or "") + (r.stderr or "")
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+    return tree_text(all_surfaces=True, timeout=5)
 
 
 def main() -> int:

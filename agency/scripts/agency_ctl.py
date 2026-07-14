@@ -6,16 +6,26 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import secrets
 import shutil
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from cmux_pane import (  # noqa: E402
+    caller_surface,
+    close_surface,
+    cmux_json,
+    cmux_run,
+    identify,
+    surface_alive,
+)
 
 HUB = "orchestrator"
 STARTING_TIMEOUT_SEC = 90
@@ -99,49 +109,6 @@ def resolve_resource(rel: str | None) -> Path | None:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def find_cmux() -> str:
-    cmux = shutil.which("cmux")
-    if cmux:
-        return cmux
-    for c in (
-        Path.home() / "bin" / "cmux",
-        Path("/Applications/cmux.app/Contents/Resources/bin/cmux"),
-    ):
-        if c.exists():
-            return str(c)
-    raise RuntimeError("cmux not found on PATH")
-
-
-def cmux_run(args: list[str], timeout: float = 15) -> subprocess.CompletedProcess[str]:
-    cmux = find_cmux()
-    return subprocess.run(
-        [cmux, *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-
-def cmux_json(args: list[str]) -> Any:
-    r = cmux_run(args)
-    if r.returncode != 0:
-        raise RuntimeError(f"cmux {' '.join(args)} failed: {r.stderr or r.stdout}")
-    text = (r.stdout or "").strip()
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return text
-
-
-def identify() -> dict[str, Any]:
-    data = cmux_json(["identify"])
-    if not isinstance(data, dict):
-        raise RuntimeError("cmux identify did not return JSON")
-    return data
 
 
 def load_sessions(root: Path) -> dict[str, Any]:
@@ -247,20 +214,6 @@ def bus_run(root: Path, args: list[str], timeout: float = 60) -> dict[str, Any]:
     return json.loads(r.stdout)
 
 
-def surface_alive(surface: str | None) -> bool | None:
-    """True/False if cmux tree available; None if tree unavailable."""
-    if not surface:
-        return None
-    try:
-        tree = cmux_run(["tree", "--all"], timeout=5)
-        text = (tree.stdout or "") + (tree.stderr or "")
-        if tree.returncode != 0 and not text.strip():
-            return None
-        return str(surface) in text
-    except Exception:
-        return None
-
-
 def find_instance_by_task(data: dict[str, Any], task_id: str) -> dict[str, Any] | None:
     for inst in data.get("instances") or []:
         if inst.get("taskId") == task_id:
@@ -354,16 +307,6 @@ def reconcile_cmux(root: Path) -> dict[str, Any]:
     if r.returncode != 0:
         raise RuntimeError(r.stderr or r.stdout)
     return json.loads(r.stdout)
-
-
-def caller_surface() -> tuple[str, str]:
-    data = identify()
-    caller = data.get("caller") or data.get("focused") or {}
-    surface = caller.get("surface_ref") or caller.get("surface_id")
-    pane = caller.get("pane_ref") or caller.get("pane_id")
-    if not surface or not pane:
-        raise RuntimeError("could not resolve caller surface/pane from cmux identify")
-    return str(surface), str(pane)
 
 
 def ensure_orchestrator(root: Path) -> dict[str, Any]:
@@ -464,67 +407,6 @@ def parse_agent_frontmatter(path: Path) -> dict[str, str]:
     return out
 
 
-def bootstrap_text(
-    instance_name: str,
-    agent_path: Path | None,
-    charter: str,
-    skill: str | None,
-    agency_export: str,
-) -> str:
-    if agent_path:
-        try:
-            persona_ref = str(agent_path.relative_to(project_root()))
-        except ValueError:
-            persona_ref = str(agent_path)
-        persona = f"Persona loaded via --append-system-prompt {persona_ref}."
-    else:
-        persona = f"Read charter {charter}."
-    skill_resolved = resolve_resource(skill) if skill else None
-    skill_disp = str(skill_resolved) if skill_resolved else skill
-    skill_line = f"On each delegate, also read skillPath: {skill_disp}." if skill_disp else ""
-    bus = str(bus_py())
-    return (
-        f"{persona} {skill_line} "
-        f"Your bus instance name is {instance_name}. "
-        f'export AGENCY_ROOT="{agency_export}". '
-        f"Immediately run: python3 {bus} recv --as {instance_name} --wait 60 --interval 2 "
-        "and process any pending delegate (report/ask to orchestrator, then bus done). "
-        "Do not wait for another human message. Do not talk to the end user."
-    )
-
-
-def write_boot_prompt(root: Path, instance_name: str, text: str) -> Path:
-    boot_dir = root / "artifacts" / "_boot"
-    boot_dir.mkdir(parents=True, exist_ok=True)
-    path = boot_dir / f"{instance_name}.txt"
-    path.write_text(text)
-    return path
-
-
-def shell_quote(s: str) -> str:
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def parse_new_split_surface(stdout: str) -> str:
-    m = re.search(r"surface:\d+", stdout)
-    if not m:
-        raise RuntimeError(f"could not parse surface from new-split output: {stdout!r}")
-    return m.group(0)
-
-
-def pane_for_surface(surface: str) -> str:
-    tree = cmux_json(["tree", "--json"])
-    if not isinstance(tree, dict):
-        raise RuntimeError("cmux tree --json failed")
-    for w in tree.get("windows") or []:
-        for ws in w.get("workspaces") or []:
-            for p in ws.get("panes") or []:
-                for s in p.get("surfaces") or []:
-                    if s.get("ref") == surface:
-                        return str(p.get("ref"))
-    raise RuntimeError(f"pane not found for {surface}")
-
-
 def cmd_list(_args: argparse.Namespace) -> int:
     root = agency_root()
     try:
@@ -547,192 +429,22 @@ def cmd_list(_args: argparse.Namespace) -> int:
 
 
 def cmd_spawn(args: argparse.Namespace) -> int:
-    root = agency_root()
-    require_orchestrator(root, recovery=bool(getattr(args, "recovery", False)))
-    try:
-        reconcile_cmux(root)
-    except Exception:
-        pass
+    from specialist_spawn import spawn_specialist
 
-    agents = load_agents(root)
-    agent = (agents.get("agents") or {}).get(args.role)
-    if not agent and args.role != HUB:
-        raise RuntimeError(f"unknown role: {args.role}")
-
-    data = load_sessions(root)
-    max_panes = int(((agents.get("spawn") or {}).get("maxSpecialistPanes")) or 6)
-
-    if args.reuse:
-        idle = find_idle_role(data, args.role)
-        if idle:
-            print(json.dumps({"ok": True, "action": "reuse", "instance": idle}, indent=2))
-            return 0
-
-    if specialist_count(data) >= max_panes:
-        raise RuntimeError(f"max specialist panes reached ({max_panes})")
-
-    spawn_cfg = agents.get("spawn") or {}
-    allow_plan_twin = bool(spawn_cfg.get("allowPlanTempTwin", True))
-    allow_work_twin = bool(spawn_cfg.get("allowWorkTwin", False))
-    max_twins = int(spawn_cfg.get("maxTempTwinsPerRole") or 1)
-
-    role_rows = [i for i in (data.get("instances") or []) if i.get("role") == args.role]
-    working_rows = [i for i in role_rows if i.get("status") == "working"]
-    temp_rows = [i for i in role_rows if i.get("lifecycle") == "temporary"]
-
-    if args.role == "work":
-        if role_rows and not allow_work_twin:
-            raise RuntimeError("Work already registered — sole writer; queue (allowWorkTwin=false)")
-        if working_rows:
-            raise RuntimeError("Work already working — queue; do not spawn a second Work")
-
-    lifecycle = args.lifecycle or (agent or {}).get("lifecycleDefault") or "temporary"
-    if lifecycle not in ("temporary", "persistent"):
-        raise RuntimeError("lifecycle must be temporary|persistent")
-
-    if args.role == "plan":
-        persistent = next((i for i in role_rows if i.get("lifecycle") == "persistent"), None)
-        if lifecycle == "persistent" and persistent:
-            if persistent.get("status") == "idle":
-                raise RuntimeError("persistent Plan already exists — use --reuse")
-            if allow_plan_twin:
-                raise RuntimeError(
-                    "Plan is busy — spawn a temporary twin with --lifecycle temporary "
-                    "(allowPlanTempTwin=true), or wait/queue"
-                )
-            raise RuntimeError("Plan busy — queue (allowPlanTempTwin=false)")
-        if lifecycle == "temporary" and working_rows:
-            if not allow_plan_twin:
-                raise RuntimeError("Plan busy — queue (allowPlanTempTwin=false)")
-            if len(temp_rows) >= max_twins:
-                raise RuntimeError(f"Plan temp twin limit reached ({max_twins})")
-
-    instance_name = args.name or make_instance_name(args.role, lifecycle)
-    if find_instance(data, instance_name):
-        raise RuntimeError(f"instance name already claimed: {instance_name}")
-
-    charter = (agent or {}).get("charterPath") or f".pi/agency/charters/{args.role}.md"
-    skill = (agent or {}).get("skillPath")
-    agent_path = agent_file_for(args.role, agent)
-    fm = parse_agent_frontmatter(agent_path) if agent_path else {}
-    tools = fm.get("tools")
-    spawn_cwd = Path(args.cwd).resolve() if args.cwd else project_root()
-    if not spawn_cwd.is_dir():
-        raise RuntimeError(f"spawn cwd is not a directory: {spawn_cwd}")
-    agency_export = str(agency_root())
-    now = utc_now()
-    row = {
-        "instanceId": f"{args.role}-{secrets.token_hex(4)}",
-        "role": args.role,
-        "intercomName": instance_name,
-        "lifecycle": lifecycle,
-        "status": "starting",
-        "cwd": str(spawn_cwd),
-        "taskId": None,
-        "cmuxSurface": None,
-        "cmuxPane": None,
-        "agentPath": str(agent_path) if agent_path else None,
-        "createdAt": now,
-        "updatedAt": now,
-    }
-    data.setdefault("instances", []).append(row)
-    save_sessions(root, data)
-    bus_run(root, ["init", instance_name])
-    if lifecycle == "persistent" or args.role in ("plan", "work"):
-        try:
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(memory_py()),
-                    "init",
-                    "--as",
-                    instance_name,
-                    "--role",
-                    args.role,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env={**os.environ, "AGENCY_ROOT": str(root), "AGENCY_PROJECT_ROOT": str(project_root())},
-            )
-        except Exception:
-            pass
-
-    if args.dry_run:
-        row["status"] = "idle"
-        row["updatedAt"] = utc_now()
-        save_sessions(root, data)
-        print(json.dumps({"ok": True, "action": "spawn-dry-run", "instance": row}, indent=2))
-        return 0
-
-    split = cmux_run(["new-split", args.direction or "right", "--focus", "false"])
-    if split.returncode != 0:
-        row["status"] = "failed"
-        row["updatedAt"] = utc_now()
-        save_sessions(root, data)
-        raise RuntimeError(split.stderr or split.stdout or "new-split failed")
-
-    surface = parse_new_split_surface(split.stdout)
-    pane = pane_for_surface(surface)
-    row["cmuxSurface"] = surface
-    row["cmuxPane"] = pane
-    row["updatedAt"] = utc_now()
-    save_sessions(root, data)
-
-    proj = str(project_root())
-    work = str(spawn_cwd)
-    boot = bootstrap_text(instance_name, agent_path, charter, skill, agency_export)
-    boot_path = write_boot_prompt(root, instance_name, boot)
-
-    # Start pi with the boot prompt as the initial CLI message so a turn begins
-    # without a second human/cmux paste (Option C boot harden).
-    parts = [f"cd {shell_quote(work)} && pi --approve --name {shell_quote(instance_name)}"]
-    if agent_path:
-        parts.append(f"--append-system-prompt {shell_quote(str(agent_path))}")
-    if tools:
-        cleaned = ",".join(t.strip() for t in tools.split(",") if t.strip())
-        if cleaned:
-            parts.append(f"--tools {shell_quote(cleaned)}")
-    parts.append(f'"$(cat {shell_quote(str(boot_path))})"')
-    pi_cmd = " ".join(parts) + "\\n"
-
-    send1 = cmux_run(["send", "--surface", surface, pi_cmd])
-    if send1.returncode != 0:
-        row["status"] = "failed"
-        row["updatedAt"] = utc_now()
-        save_sessions(root, data)
-        raise RuntimeError(f"cmux send pi failed: {send1.stderr or send1.stdout}")
-
-    nudged = False
-    if args.nudge and args.boot_wait > 0:
-        time.sleep(args.boot_wait)
-        # Fallback kick into the running pi TUI (single user message + Enter).
-        nudge_body = (
-            f"If idle: export AGENCY_ROOT={agency_export}; "
-            f"python3 {agency_export}/scripts/bus.py recv --as {instance_name} "
-            f"--wait 60 --interval 2; process any delegate now."
-        )
-        nudge = nudge_body.replace("\\", "\\\\").replace("\n", "\\n") + "\\n"
-        send2 = cmux_run(["send", "--surface", surface, nudge])
-        nudged = send2.returncode == 0
-
-    row["status"] = "idle"
-    row["updatedAt"] = utc_now()
-    save_sessions(root, data)
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "action": "spawn",
-                "instance": row,
-                "bootWaitSec": args.boot_wait,
-                "bootPromptPath": str(boot_path),
-                "nudged": nudged,
-                "piCommand": pi_cmd.replace("\\n", ""),
-            },
-            indent=2,
-        )
+    result = spawn_specialist(
+        args.role,
+        lifecycle=args.lifecycle,
+        name=args.name,
+        direction=args.direction or "right",
+        reuse=bool(args.reuse),
+        dry_run=bool(args.dry_run),
+        boot_wait=float(args.boot_wait),
+        cwd=args.cwd,
+        nudge=bool(args.nudge),
+        recovery=bool(getattr(args, "recovery", False)),
+        message=getattr(args, "message", None),
     )
+    print(json.dumps(result, indent=2))
     return 0
 
 
@@ -964,7 +676,7 @@ def cmd_release(args: argparse.Namespace) -> int:
     surface = inst.get("cmuxSurface")
     closed = None
     if surface and not args.keep_pane:
-        r = cmux_run(["close-surface", "--surface", str(surface)])
+        r = close_surface(str(surface))
         closed = {"ok": r.returncode == 0, "stdout": (r.stdout or "").strip(), "stderr": (r.stderr or "").strip()}
 
     data["instances"] = [
@@ -1010,6 +722,11 @@ def main() -> int:
     sp.add_argument("--dry-run", action="store_true")
     sp.add_argument("--boot-wait", type=float, default=5.0)
     sp.add_argument("--cwd", help="Pane working directory (Scout reference-repo mode)")
+    sp.add_argument(
+        "--message",
+        "-m",
+        help="Custom first-turn boot message (replaces default bus-recv prompt)",
+    )
     sp.add_argument(
         "--nudge",
         action=argparse.BooleanOptionalAction,

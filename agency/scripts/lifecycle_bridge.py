@@ -13,6 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from cmux_pane import close_surface, send_to_surface  # noqa: E402
+
 # draft timers from docs/architecture.md
 SILENT_SETTLE_GRACE_SEC = 60
 NUDGE_START_WAIT_SEC = 25
@@ -399,13 +405,15 @@ def nudge_instance(ctl: Any, inst: dict[str, Any], task_id: str) -> dict[str, An
         f"Immediately send a report (or ask) to orchestrator via the hybrid bus. "
         f"Do not go idle again without reporting."
     )
-    nudge = body.replace("\\", "\\\\").replace("\n", "\\n") + "\\n"
-    r = ctl.cmux_run(["send", "--surface", str(surface), nudge])
-    return {
-        "ok": r.returncode == 0,
-        "stdout": (r.stdout or "").strip(),
-        "stderr": (r.stderr or "").strip(),
-    }
+    try:
+        r = send_to_surface(str(surface), body, enter=True)
+        return {
+            "ok": r.returncode == 0,
+            "stdout": (r.stdout or "").strip(),
+            "stderr": (r.stderr or "").strip(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
@@ -561,7 +569,7 @@ def cmd_abandon(args: argparse.Namespace) -> int:
     surface = inst.get("cmuxSurface")
     closed = None
     if surface and not args.keep_pane:
-        r = ctl.cmux_run(["close-surface", "--surface", str(surface)])
+        r = close_surface(str(surface))
         closed = {"ok": r.returncode == 0}
 
     data["instances"] = [
