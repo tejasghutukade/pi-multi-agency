@@ -415,24 +415,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     kit = kit_root()
     pkg = package_root()
 
-    if agency.exists() and not args.force:
-        if (agency / "agents.yaml").exists() and (agency / "sessions.json").exists():
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "action": "init",
-                        "skipped": True,
-                        "reason": "already initialized (pass --force to refresh templates)",
-                        "agencyRoot": str(agency),
-                        "projectRoot": str(proj),
-                        "packageRoot": str(pkg),
-                    },
-                    indent=2,
-                )
-            )
-            return 0
-
     agency.mkdir(parents=True, exist_ok=True)
     agents_dir.mkdir(parents=True, exist_ok=True)
 
@@ -449,12 +431,38 @@ def cmd_init(args: argparse.Namespace) -> int:
         shutil.copytree(src, dest)
         copied.append(str(dest.relative_to(proj)) + "/")
 
+    # Always refresh persona files from the package kit so template fixes
+    # (e.g. added agency_report/agency_ask/agency_progress tools) propagate
+    # to existing projects without a manual --force re-init. State
+    # (sessions.json) and config (agents.yaml) are never overwritten here.
+    for md in (pkg / "agents").glob("*.md"):
+        copy_file(md, agents_dir / md.name)
+
+    if (
+        (agency / "agents.yaml").exists()
+        and (agency / "sessions.json").exists()
+        and not args.force
+    ):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "init",
+                    "skipped": True,
+                    "reason": "already initialized (persona files refreshed from kit; pass --force to refresh templates/config)",
+                    "agencyRoot": str(agency),
+                    "projectRoot": str(proj),
+                    "packageRoot": str(pkg),
+                    "refreshed": copied,
+                },
+                indent=2,
+            )
+        )
+        return 0
+
     copy_file(kit / "agents.yaml", agency / "agents.yaml")
     copy_file(kit / "memory-spec.md", agency / "memory-spec.md")
     copy_tree(kit / "charters", agency / "charters")
-
-    for md in (pkg / "agents").glob("*.md"):
-        copy_file(md, agents_dir / md.name)
 
     sessions = agency / "sessions.json"
     if not sessions.exists() or args.force:

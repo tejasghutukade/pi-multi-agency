@@ -75,6 +75,8 @@ def bootstrap_text(
         f'export AGENCY_ROOT="{agency_export}"; '
         f'export MEMORY="{memory}"; '
         "Use agency_report / agency_ask / agency_progress for all agency messages. "
+        "Prefer built-in tools (read, grep, find, ls) over bash for read-only exploration; "
+        "use bash only when no built-in tool can do the job. "
         "Wait for broker-injected delegates/replies in this Pi session. "
         "Do not wait for another human message. Do not talk to the end user."
     )
