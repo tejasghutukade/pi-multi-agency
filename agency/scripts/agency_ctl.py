@@ -460,9 +460,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not sessions.exists() or args.force:
         copy_file(kit / "templates" / "sessions.json", sessions)
 
-    (agency / ".package-root").write_text(str(pkg) + "\n")
-    copied.append(".pi/agency/.package-root")
-
     print(
         json.dumps(
             {

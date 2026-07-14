@@ -28,7 +28,10 @@ def agency_root() -> Path:
     local = proj / ".pi" / "agency"
     if local.is_dir():
         return local.resolve()
-    return kit_root()
+    raise RuntimeError(
+        f"No agency root resolved: {proj} has no .pi/agency and AGENCY_ROOT is unset. "
+        "Run agency_init in the project, or set AGENCY_ROOT / AGENCY_PROJECT_ROOT."
+    )
 
 
 def project_root() -> Path:
