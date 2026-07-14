@@ -271,7 +271,7 @@ def cmd_list(_args: argparse.Namespace) -> int:
 
 
 def cmd_spawn(args: argparse.Namespace) -> int:
-    from specialist_spawn import spawn_specialist
+    from agent_spawn import spawn_specialist
 
     result = spawn_specialist(
         args.role,
