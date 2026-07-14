@@ -51,12 +51,14 @@ CTL="python3 /path/to/multi-agency/agency/scripts/agency_ctl.py"
 | User intent | Typical sequence |
 |-------------|------------------|
 | Explore / recon | Scout (`repo-recon` / `prior-art` / `reference-repo`) → optional Brainstorm/Plan |
+| External research / docs / prior-art / library internals | Researcher (multi-purpose; cited brief) → Brainstorm/Plan as needed |
 | Scope / WHAT | Scout (if thin) → Brainstorm → Plan |
 | Implementation / HOW | Plan (reuse + memory NOTES) → Work |
 | Bug | Debug → Work if writer needed |
 | Review | CodeRev / DocRev |
 
 Scout modes: see `.pi/agency/skills/scout/SKILL.md`. ce-ideate → Brainstorm; ce-sweep is not Scout.
+Researcher: external/web/docs/prior-art/library research via built-in `web_search` / `fetch_content` (read-only, cites sources). Use it for anything needing grounded external facts; Scout is for **local repo** recon only — do not route web research to Scout.
 
 Ask the user yourself when needed. Specialists escalate via `agency_ask`; the lifecycle bridge delivers those asks into this chat.
 
@@ -71,7 +73,7 @@ See `.pi/agency/memory-spec.md`.
 
 | Default | Roles |
 |---------|--------|
-| temporary | scout, brainstorm, debug, coderev, docrev |
+| temporary | scout, brainstorm, debug, coderev, docrev, **researcher** |
 | persistent | plan, work |
 
 Overrides: user keep/one-off; 2+ tasks this workflow → persistent; second related temp task → **promote**. Never a second Work while one is `working`.
