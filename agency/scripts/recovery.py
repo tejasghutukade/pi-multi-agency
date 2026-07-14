@@ -149,6 +149,14 @@ def cmd_idle_teardown(args: argparse.Namespace) -> int:
         return 0
 
     closed = teardown_instance(ctl, root, inst, keep_pane=False)
+    from agency_events import emit
+
+    emit(
+        "recovery.idle_teardown",
+        root=root,
+        instance=name,
+        reason=args.reason or "temp-idle-timeout",
+    )
     print(
         json.dumps(
             {
@@ -298,6 +306,15 @@ def cmd_tick(args: argparse.Namespace) -> int:
     inst["awaitingStartAfterNudge"] = True
     inst["updatedAt"] = now
     ctl.save_sessions(root, data)
+    from agency_events import emit
+
+    emit(
+        "recovery.nudged",
+        root=root,
+        instance=args.name,
+        taskId=task_id,
+        nudgeOk=bool(result.get("ok")),
+    )
     print(
         json.dumps(
             {
@@ -430,6 +447,17 @@ def cmd_abandon(args: argparse.Namespace) -> int:
             "--payload-json",
             json.dumps(notice),
         ],
+    )
+
+    from agency_events import emit
+
+    emit(
+        "recovery.abandoned",
+        root=root,
+        instance=args.name,
+        replacement=new_name,
+        taskId=task_id,
+        reason=args.reason or "no-agent_start-after-nudge",
     )
 
     print(

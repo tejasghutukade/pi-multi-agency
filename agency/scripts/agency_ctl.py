@@ -271,6 +271,18 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_observe(args: argparse.Namespace) -> int:
+    from agency_observe import main as observe_main
+
+    argv: list[str] = []
+    if args.root:
+        argv.extend(["--root", args.root])
+    argv.extend(["--host", args.host, "--port", str(args.port)])
+    if args.snapshot:
+        argv.append("--snapshot")
+    return observe_main(argv)
+
+
 def cmd_spawn(args: argparse.Namespace) -> int:
     from agent_spawn import spawn_specialist
 
@@ -626,6 +638,12 @@ def main() -> int:
     )
     hs.add_argument("--project", help="Project root (default: cwd)")
 
+    obs = sub.add_parser("observe", help="Local ops observer UI (roster / bus / timeline)")
+    obs.add_argument("--root", help="Agency root (default AGENCY_ROOT)")
+    obs.add_argument("--host", default="127.0.0.1")
+    obs.add_argument("--port", type=int, default=8765)
+    obs.add_argument("--snapshot", action="store_true", help="Print one JSON snapshot and exit")
+
     lc = sub.add_parser("lifecycle", help="Pi lifecycle bridge (status / tick / delivery / abandon)")
     lc.add_argument(
         "lifecycle_args",
@@ -639,6 +657,8 @@ def main() -> int:
             return cmd_init(args)
         if args.cmd == "hub-start":
             return cmd_hub_start(args)
+        if args.cmd == "observe":
+            return cmd_observe(args)
         if args.cmd == "list":
             return cmd_list(args)
         if args.cmd == "spawn":

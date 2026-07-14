@@ -72,6 +72,17 @@ def claim_for_delivery(root: Path, *, task_id: str | None = None) -> dict[str, A
     processing = root / "inbox" / HUB / "processing" / chosen.name
     chosen.replace(processing)
     text = format_delivery_text(env)
+    from agency_events import emit
+
+    emit(
+        "hub.delivery.claimed",
+        root=root,
+        instance=HUB,
+        taskId=env.get("taskId"),
+        envelopeType=env.get("type"),
+        fromName=env.get("from"),
+        path=str(processing),
+    )
     return {
         "ok": True,
         "empty": False,
@@ -104,6 +115,17 @@ def ack_delivery(root: Path, path: Path) -> dict[str, Any]:
                 inst["lastDelegate"] = None
             inst["updatedAt"] = utc_now()
             save_sessions(root, data)
+    from agency_events import emit
+
+    emit(
+        "hub.delivery.acked",
+        root=root,
+        instance=HUB,
+        taskId=env.get("taskId"),
+        envelopeType=env.get("type"),
+        fromName=env.get("from"),
+        path=str(dest),
+    )
     return {"ok": True, "done": str(dest)}
 
 

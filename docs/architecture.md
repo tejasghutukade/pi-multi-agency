@@ -349,6 +349,8 @@ Plain `pi --append-system-prompt .pi/agents/orchestrator.md` without `--tools` i
 
 **Implemented (v1 control plane):** package `extensions/multi-agency/` + `agency/scripts/agency_ctl.py`. The extension owns cmux + `sessions.json`; messaging stays on `bus.py` + cmux notify (pi-intercom demoted). Orchestrator-only gate: caller cmux surface must match the claimed orchestrator row (`/agency-claim` or first spawn). Project state after `agency_init` lives under `<project>/.pi/agency/` (scripts stay in the package).
 
+**Ops observer (v0.3+):** `agency_ctl observe` serves a localhost dashboard projecting `sessions.json` + inbox stages. Optional `AGENCY_EVENTS=1` appends `.pi/agency/events.jsonl` from thin emit hooks (ledger/bus/cmux/recovery) — timeline aid only; never authoritative. UI attaches anytime; claim is a roster badge.
+
 ### Pi lifecycle bridge (v0.3 — shipping)
 
 **Status:** implemented in package `extensions/multi-agency/lifecycle.ts` + `agency/scripts/lifecycle_bridge.py` (`agency_ctl lifecycle …`). This **supersedes** Orchestrator-blocking `agency_wait` as the primary completion path.

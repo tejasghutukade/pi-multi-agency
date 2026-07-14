@@ -91,6 +91,17 @@ python3 /path/to/multi-agency/agency/scripts/agency_ctl.py claim-orchestrator
 python3 /path/to/multi-agency/agency/scripts/agency_ctl.py spawn --role scout --lifecycle temporary
 ```
 
+### Ops observer
+
+Live roster / bus / timeline UI (localhost). Files under `.pi/agency` are truth; optional emit timeline needs `AGENCY_EVENTS=1`. Claim is a hub badge, not a gate to open the UI.
+
+```bash
+export AGENCY_ROOT="$PWD/.pi/agency"
+export AGENCY_EVENTS=1   # optional — timeline emit
+python3 /path/to/multi-agency/agency/scripts/agency_ctl.py observe
+# → http://127.0.0.1:8765/
+```
+
 ## Layout
 
 ```

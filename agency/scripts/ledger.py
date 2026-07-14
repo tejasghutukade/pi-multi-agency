@@ -19,7 +19,19 @@ def load_sessions(root: Path) -> dict[str, Any]:
 
 
 def save_sessions(root: Path, data: dict[str, Any]) -> None:
-    (root / "sessions.json").write_text(json.dumps(data, indent=2) + "\n")
+    from agency_events import emit, sessions_delta
+
+    before = None
+    path = root / "sessions.json"
+    if path.exists():
+        try:
+            before = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            before = None
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    changes = sessions_delta(before, data)
+    if changes:
+        emit("sessions.saved", root=root, changes=changes)
 
 
 def find_instance(data: dict[str, Any], name: str) -> dict[str, Any] | None:

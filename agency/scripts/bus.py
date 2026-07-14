@@ -175,6 +175,18 @@ def cmd_send(args: argparse.Namespace) -> int:
     out = root / "outbox" / f"{msg_id}.json"
     out.write_text(json.dumps(env, indent=2) + "\n")
 
+    from agency_events import emit
+
+    emit(
+        "bus.sent",
+        root=root,
+        instance=args.to,
+        taskId=args.task_id,
+        envelopeType=args.type,
+        fromName=args.from_name,
+        path=str(final),
+    )
+
     notified = False
     if not args.no_notify:
         notified = cmux_notify(notify_title, notify_body)
@@ -204,12 +216,36 @@ def claim_pending(root: Path, name: str, src: Path) -> tuple[Path, dict]:
     processing = root / "inbox" / name / "processing" / src.name
     src.replace(processing)
     data = json.loads(processing.read_text())
+    from agency_events import emit
+
+    emit(
+        "bus.claimed",
+        root=root,
+        instance=name,
+        taskId=data.get("taskId"),
+        envelopeType=data.get("type"),
+        path=str(processing),
+    )
     return processing, data
 
 
 def move_to_done(root: Path, name: str, path: Path) -> Path:
     dest = root / "inbox" / name / "done" / path.name
     path.replace(dest)
+    try:
+        data = json.loads(dest.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    from agency_events import emit
+
+    emit(
+        "bus.done",
+        root=root,
+        instance=name,
+        taskId=data.get("taskId"),
+        envelopeType=data.get("type"),
+        path=str(dest),
+    )
     return dest
 
 

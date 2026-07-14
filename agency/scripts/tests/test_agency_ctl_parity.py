@@ -19,6 +19,7 @@ def test_public_subcommands_registered():
         "init",
         "hub-start",
         "lifecycle",
+        "observe",
     }
     # invoke main --help path by inspecting argparse construction in a dry way:
     # call agency_ctl.main's parser by importing and reconstructing from source tokens

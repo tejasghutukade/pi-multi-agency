@@ -146,7 +146,15 @@ def send_to_surface(surface: str, text: str, *, enter: bool = True) -> subproces
 
 
 def close_surface(surface: str) -> subprocess.CompletedProcess[str]:
-    return cmux_run(["close-surface", "--surface", str(surface)])
+    r = cmux_run(["close-surface", "--surface", str(surface)])
+    try:
+        from agency_events import emit
+        from agency_paths import agency_root
+
+        emit("cmux.closed", root=agency_root(), surface=str(surface), ok=r.returncode == 0)
+    except Exception:
+        pass
+    return r
 
 
 def open_pane(
@@ -172,13 +180,21 @@ def open_pane(
     if command is not None:
         send_to_surface(surface, command, enter=enter)
         sent = True
-    return {
+    result = {
         "surface": surface,
         "pane": pane,
         "direction": direction or "right",
         "command": command,
         "sent": sent,
     }
+    try:
+        from agency_events import emit
+        from agency_paths import agency_root
+
+        emit("cmux.opened", root=agency_root(), surface=surface, pane=pane, direction=result["direction"])
+    except Exception:
+        pass
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
