@@ -5,17 +5,30 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from pathlib import Path
 from typing import Any
 
 HUB = "orchestrator"
 
 
-def load_sessions(root: Path) -> dict[str, Any]:
+def load_sessions(root: Path, *, attempts: int = 5) -> dict[str, Any]:
     path = root / "sessions.json"
     if not path.exists():
         return {"version": 1, "instances": []}
-    return json.loads(path.read_text())
+    last_err: Exception | None = None
+    for i in range(attempts):
+        try:
+            text = path.read_text()
+            if not text.strip():
+                raise json.JSONDecodeError("Expecting value", text, 0)
+            return json.loads(text)
+        except (OSError, json.JSONDecodeError) as e:
+            last_err = e
+            time.sleep(0.02 * (i + 1))
+    if last_err:
+        raise last_err
+    return {"version": 1, "instances": []}
 
 
 def save_sessions(root: Path, data: dict[str, Any]) -> None:
@@ -25,10 +38,13 @@ def save_sessions(root: Path, data: dict[str, Any]) -> None:
     path = root / "sessions.json"
     if path.exists():
         try:
-            before = json.loads(path.read_text())
+            before = load_sessions(root)
         except (OSError, json.JSONDecodeError):
             before = None
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    payload = json.dumps(data, indent=2) + "\n"
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    tmp.write_text(payload)
+    tmp.replace(path)
     changes = sessions_delta(before, data)
     if changes:
         emit("sessions.saved", root=root, changes=changes)

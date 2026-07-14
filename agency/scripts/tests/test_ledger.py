@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import agency_paths
@@ -25,6 +26,35 @@ def test_ledger_round_trip(tmp_path: Path):
     assert ledger.find_by_surface(loaded, "surface:1") == inst
     assert ledger.find_idle_role(loaded, "scout") == inst
     assert ledger.specialist_count(loaded) == 1
+
+
+def test_load_sessions_retries_transient_empty(tmp_path: Path, monkeypatch):
+    """Race: concurrent write_text can leave a brief empty file → JSONDecodeError."""
+    path = tmp_path / "sessions.json"
+    path.write_text('{"version": 1, "instances": []}\n')
+    reads: list[int] = []
+    real = Path.read_text
+
+    def flaky(self, *args, **kwargs):
+        text = real(self, *args, **kwargs)
+        if self.name == "sessions.json":
+            reads.append(1)
+            if len(reads) == 1:
+                return ""
+        return text
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    monkeypatch.setattr(ledger.time, "sleep", lambda _s: None)
+    data = ledger.load_sessions(tmp_path)
+    assert data["instances"] == []
+    assert len(reads) >= 2
+
+
+def test_save_sessions_atomic_leaves_no_tmp(tmp_path: Path):
+    ledger.save_sessions(tmp_path, {"version": 1, "instances": [{"intercomName": "orchestrator"}]})
+    assert not list(tmp_path.glob("sessions.json.*.tmp"))
+    assert not list(tmp_path.glob(".sessions.json*.tmp"))
+    assert json.loads((tmp_path / "sessions.json").read_text())["instances"][0]["intercomName"] == "orchestrator"
 
 
 def test_ledger_clear_and_empty_finds():
