@@ -73,6 +73,10 @@ def acl_allows(root: Path, frm: str, to: str, phase1_hub_only: bool = True) -> b
 
 
 def cmux_notify(title: str, body: str) -> bool:
+    return _notify(title, body)
+
+
+def _default_cmux_notify(title: str, body: str) -> bool:
     cmux = shutil.which("cmux")
     if not cmux:
         home_bin = Path.home() / "bin" / "cmux"
@@ -90,6 +94,15 @@ def cmux_notify(title: str, body: str) -> bool:
         return r.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+_notify = _default_cmux_notify
+
+
+def set_notify(fn) -> None:
+    """Override notify side-effect (tests). Pass None to restore default."""
+    global _notify
+    _notify = fn if fn is not None else _default_cmux_notify
 
 
 def cmd_send(args: argparse.Namespace) -> int:
