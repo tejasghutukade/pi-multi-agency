@@ -93,6 +93,125 @@ function textResult(obj: unknown) {
 	};
 }
 
+type AgencyInstance = {
+	intercomName?: string;
+	role?: string;
+	status?: string;
+	lifecycle?: string;
+	taskId?: string | null;
+	cmuxSurface?: string | null;
+	cmuxPane?: string | null;
+};
+
+type AgencyListPayload = {
+	specialistCount?: number;
+	instances?: AgencyInstance[];
+	reconcile?: {
+		ok?: boolean;
+		before?: number;
+		after?: number;
+		at?: string;
+		error?: string;
+		cleared?: Array<{ intercomName?: string; status?: string }>;
+	};
+};
+
+function formatAgencyList(payload: AgencyListPayload): string {
+	const instances = payload.instances || [];
+	const specialistCount = payload.specialistCount ?? Math.max(0, instances.length - 1);
+	const rec = payload.reconcile || {};
+	const cleared = rec.cleared || [];
+
+	const lines: string[] = [];
+	lines.push("Agency roster");
+	lines.push(`- Instances: ${instances.length} (specialists: ${specialistCount})`);
+	if (rec.error) {
+		lines.push(`- Reconcile: error (${rec.error})`);
+	} else if (rec.ok) {
+		lines.push(
+			`- Reconcile: before ${rec.before ?? "?"} → after ${rec.after ?? "?"}; cleared ${cleared.length}${rec.at ? ` at ${rec.at}` : ""}`,
+		);
+	}
+	lines.push("");
+
+	if (!instances.length) {
+		lines.push("No active instances.");
+	} else {
+		lines.push("| Instance | Role | Status | Lifecycle | Task | Surface | Pane |");
+		lines.push("|---|---|---|---|---|---|---|");
+		for (const i of instances) {
+			lines.push(
+				`| ${i.intercomName || "-"} | ${i.role || "-"} | ${i.status || "-"} | ${i.lifecycle || "-"} | ${i.taskId || "-"} | ${i.cmuxSurface || "-"} | ${i.cmuxPane || "-"} |`,
+			);
+		}
+	}
+
+	if (cleared.length) {
+		lines.push("");
+		lines.push("Cleared stale sessions:");
+		for (const c of cleared) {
+			lines.push(`- ${c.intercomName || "unknown"}${c.status ? ` (${c.status})` : ""}`);
+		}
+	}
+
+	return lines.join("\n");
+}
+
+type AgencyDelegatePayload = {
+	ok?: boolean;
+	action?: string;
+	to?: string;
+	taskId?: string;
+	bus?: {
+		ok?: boolean;
+		id?: string;
+		path?: string;
+		notified?: boolean;
+	};
+	instance?: AgencyInstance & {
+		lastDelegate?: {
+			workflowId?: string;
+			payload?: {
+				goal?: string;
+				outputShape?: string;
+			};
+		};
+	};
+};
+
+function clip(text: string | undefined, max = 140): string {
+	if (!text) return "-";
+	const t = text.replace(/\s+/g, " ").trim();
+	if (t.length <= max) return t;
+	return `${t.slice(0, max - 1)}…`;
+}
+
+function formatAgencyDelegate(payload: AgencyDelegatePayload): string {
+	const b = payload.bus || {};
+	const inst = payload.instance || {};
+	const d = inst.lastDelegate || {};
+	const p = d.payload || {};
+
+	const lines: string[] = [];
+	lines.push("Delegate queued");
+	lines.push(`- To: ${payload.to || "-"}`);
+	lines.push(`- taskId: ${payload.taskId || "-"}`);
+	if (d.workflowId) lines.push(`- workflowId: ${d.workflowId}`);
+	lines.push(`- Bus envelope: ${b.id || "-"} (${b.ok ? "ok" : "failed"})`);
+	lines.push(`- Notified: ${b.notified ? "yes" : "no"}`);
+	if (b.path) lines.push(`- Pending file: ${b.path}`);
+	lines.push("");
+	lines.push("Instance state");
+	lines.push(`- ${inst.intercomName || "-"} · ${inst.role || "-"} · ${inst.status || "-"}`);
+	lines.push(`- Surface: ${inst.cmuxSurface || "-"}  Pane: ${inst.cmuxPane || "-"}`);
+	lines.push("");
+	lines.push("Delegate payload");
+	lines.push(`- Goal: ${clip(p.goal, 180)}`);
+	lines.push(`- Output: ${clip(p.outputShape, 140)}`);
+
+	return lines.join("\n");
+}
+
 export default function multiAgencyExtension(pi: ExtensionAPI) {
 	const packageRoot = findPackageRoot();
 	const projectRoot = findProjectRoot(process.cwd());
@@ -146,6 +265,127 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("agency-ops", {
+		description: "Ops observer manager: /agency-ops start|stop|status [--port N]",
+		handler: async (rawArgs, ctx) => {
+			const args = (rawArgs || "").trim().split(/\s+/).filter(Boolean);
+			const action = (args[0] || "start").toLowerCase();
+			let port = 8765;
+			for (let i = 1; i < args.length; i++) {
+				if (args[i] === "--port" && args[i + 1]) {
+					const n = Number(args[i + 1]);
+					if (!Number.isFinite(n) || n < 1 || n > 65535) {
+						ctx.ui.notify(`invalid --port: ${args[i + 1]}`, "error");
+						return;
+					}
+					port = Math.trunc(n);
+					i++;
+				}
+			}
+
+			const agencyRoot = path.join(projectRoot, ".pi", "agency");
+			const pidPath = path.join(agencyRoot, "observe.pid.json");
+			const logPath = path.join(agencyRoot, "observe.log");
+			const pidAlive = (pid: number) => {
+				try {
+					process.kill(pid, 0);
+					return true;
+				} catch {
+					return false;
+				}
+			};
+			const readPid = () => {
+				if (!fs.existsSync(pidPath)) return null;
+				try {
+					return JSON.parse(fs.readFileSync(pidPath, "utf8")) as {
+						pid: number;
+						port?: number;
+						startedAt?: string;
+					};
+				} catch {
+					return null;
+				}
+			};
+
+			if (action === "status") {
+				const info = readPid();
+				if (!info?.pid || !pidAlive(info.pid)) {
+					ctx.ui.notify("ops observer: not running", "info");
+					return;
+				}
+				ctx.ui.notify(`ops observer running: http://127.0.0.1:${info.port || 8765}/`, "info");
+				return;
+			}
+
+			if (action === "stop") {
+				const info = readPid();
+				if (!info?.pid) {
+					ctx.ui.notify("ops observer: not running", "info");
+					return;
+				}
+				if (pidAlive(info.pid)) {
+					try {
+						process.kill(info.pid, "SIGTERM");
+					} catch {
+						/* already gone */
+					}
+				}
+				try {
+					fs.unlinkSync(pidPath);
+				} catch {
+					/* ignore */
+				}
+				ctx.ui.notify("ops observer stopped", "info");
+				return;
+			}
+
+			if (action !== "start") {
+				ctx.ui.notify("usage: /agency-ops start|stop|status [--port 8765]", "info");
+				return;
+			}
+
+			if (!fs.existsSync(agencyRoot)) {
+				const r = await ctl(["init", "--project", projectRoot]);
+				if (r.code !== 0) {
+					ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "agency init failed", "error");
+					return;
+				}
+			}
+
+			const running = readPid();
+			if (running?.pid && pidAlive(running.pid)) {
+				ctx.ui.notify(`ops observer already running: http://127.0.0.1:${running.port || 8765}/`, "info");
+				return;
+			}
+
+			fs.mkdirSync(agencyRoot, { recursive: true });
+			const outFd = fs.openSync(logPath, "a");
+			const child = spawn("python3", [agencyCtlPath(packageRoot), "observe", "--root", agencyRoot, "--host", "127.0.0.1", "--port", String(port)], {
+				cwd: projectRoot,
+				env: {
+					...process.env,
+					AGENCY_ROOT: agencyRoot,
+					AGENCY_PROJECT_ROOT: projectRoot,
+					PATH: `${process.env.HOME}/bin:${process.env.PATH || ""}`,
+				},
+				detached: true,
+				stdio: ["ignore", outFd, outFd],
+			});
+			child.unref();
+			fs.closeSync(outFd);
+			if (!child.pid) {
+				ctx.ui.notify("failed to start ops observer", "error");
+				return;
+			}
+			fs.writeFileSync(
+				pidPath,
+				JSON.stringify({ pid: child.pid, port, startedAt: new Date().toISOString() }, null, 2) + "\n",
+			);
+			ctx.ui.notify(`ops observer started: http://127.0.0.1:${port}/`, "info");
+			ctx.ui.notify(`log: ${path.join(".pi", "agency", "observe.log")}`, "info");
+		},
+	});
+
 	pi.registerTool({
 		name: "agency_init",
 		label: "Agency init",
@@ -172,7 +412,11 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		async execute(_id, _params, signal) {
 			const r = await ctl(["list"], signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_list failed");
-			return textResult(JSON.parse(r.stdout));
+			const payload = JSON.parse(r.stdout) as AgencyListPayload;
+			return {
+				content: [{ type: "text" as const, text: formatAgencyList(payload) }],
+				details: payload,
+			};
 		},
 	});
 
@@ -253,7 +497,11 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.payloadJson) args.push("--payload-json", params.payloadJson);
 			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_delegate failed");
-			return textResult(JSON.parse(r.stdout));
+			const payload = JSON.parse(r.stdout) as AgencyDelegatePayload;
+			return {
+				content: [{ type: "text" as const, text: formatAgencyDelegate(payload) }],
+				details: payload,
+			};
 		},
 	});
 

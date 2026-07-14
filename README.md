@@ -76,7 +76,7 @@ python3 /path/to/multi-agency/agency/scripts/agency_ctl.py init
 | `agency_wait` | **Legacy** inbox poll (prefer lifecycle push/queue) |
 | `agency_release` | Idle persistent / teardown temp |
 
-Commands: `/agency-init`, `/agency-claim`, `/agency-hub`
+Commands: `/agency-init`, `/agency-claim`, `/agency-hub`, `/agency-ops start|stop|status [--port N]`
 
 After delegate, the **lifecycle bridge** pushes specialist `report`/`ask` into the hub chat when idle, or shows a queue banner while the hub is working. Silent settle without a report gets one nudge, then abandon + respawn if the specialist does not start again.
 
