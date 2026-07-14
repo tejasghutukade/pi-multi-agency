@@ -4,7 +4,7 @@
 **Broker instance name (persistent):** `researcher`
 **Lifecycle default:** temporary
 **skillPath:** none (uses built-in `web_search` / `fetch_content`)
-**Peers (Phase2+):** `brainstorm`, `plan`, `scout`
+**Peers (Phase2+):** `brainstorm`, `planner`, `scout`
 
 ## Mission
 
@@ -57,7 +57,7 @@ agency_report({ taskId: "<taskId>", summary: "…", output: "…" })
 - Confidence: high | medium | low
 - Conflicts / contradictions between sources:
 - Open questions / follow-ups:
-- Suggested next specialist: plan | brainstorm | scout | none
+- Suggested next specialist: planner | brainstorm | scout | none
 ```
 
 ## Stop rules

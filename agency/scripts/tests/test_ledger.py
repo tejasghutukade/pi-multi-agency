@@ -75,7 +75,7 @@ def test_ledger_clear_and_empty_finds():
 def test_ledger_make_instance_name(monkeypatch):
     monkeypatch.setattr(ledger.secrets, "token_hex", lambda n: "ab")
     assert ledger.make_instance_name("scout", "temporary") == "scout-tab"
-    assert ledger.make_instance_name("plan", "persistent") == "plan"
+    assert ledger.make_instance_name("planner", "persistent") == "planner"
 
 
 def test_ledger_and_paths_do_not_import_agency_ctl():

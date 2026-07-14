@@ -34,7 +34,7 @@ def test_catalog_frontmatter(tmp_path: Path):
 def test_catalog_role_of():
     assert catalog.role_of("orchestrator") == "orchestrator"
     assert catalog.role_of("scout-tabc") == "scout"
-    assert catalog.role_of("plan") == "plan"
+    assert catalog.role_of("planner") == "planner"
 
 
 def test_catalog_does_not_import_agency_ctl():

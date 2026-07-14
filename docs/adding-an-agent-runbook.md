@@ -34,8 +34,8 @@ under `agents:`, then 4 for fields):
     # No skillPath if the agent uses built-in tools (e.g. web_search)
     binding: layered
     intercomName: researcher
-    lifecycleDefault: temporary   # or persistent for long-lived roles (plan, work)
-    peers: [brainstorm, plan, scout]
+    lifecycleDefault: temporary   # or persistent for long-lived roles (planner, worker)
+    peers: [brainstorm, planner, scout]
     # Read-only research: web + read/search tools, no write/edit/bash
     tools: read,grep,find,ls,web_search,fetch_content,agency_report,agency_ask,agency_progress
 ```
@@ -43,7 +43,7 @@ under `agents:`, then 4 for fields):
 Tool-allowlist conventions:
 - **Orchestrator:** `read,grep,find,ls,agency_init,agency_list,agency_spawn,agency_delegate,agency_release` (no write/edit/bash).
 - **Read-only agents** (scout, researcher): no `write`/`edit`/`bash`.
-- **Writable agents** (brainstorm, plan, work): add `write,edit,bash`.
+- **Writable agents** (brainstorm, planner, worker): add `write,edit,bash`.
 - **Every specialist** needs `agency_report,agency_ask,agency_progress`
   (the broker transport tools). Never include `bus.py`/`$BUS`.
 

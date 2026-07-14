@@ -135,24 +135,24 @@ def spawn_specialist(
     working_rows = [i for i in role_rows if i.get("status") == "working"]
     temp_rows = [i for i in role_rows if i.get("lifecycle") == "temporary"]
 
-    if role == "work":
+    if role == "worker":
         if role_rows and not allow_work_twin:
-            raise RuntimeError("Work already registered — sole writer; queue (allowWorkTwin=false)")
+            raise RuntimeError("Worker already registered — sole writer; queue (allowWorkTwin=false)")
         if working_rows:
-            raise RuntimeError("Work already working — queue; do not spawn a second Work")
+            raise RuntimeError("Worker already working — queue; do not spawn a second Worker")
 
     resolved_lifecycle = lifecycle or agent.get("lifecycleDefault") or "temporary"
     if resolved_lifecycle not in ("temporary", "persistent"):
         raise RuntimeError("lifecycle must be temporary|persistent")
 
-    if role == "plan":
+    if role == "planner":
         persistent = next((i for i in role_rows if i.get("lifecycle") == "persistent"), None)
         if resolved_lifecycle == "persistent" and persistent:
             if persistent.get("status") == "idle":
-                raise RuntimeError("persistent Plan already exists — use --reuse")
+                raise RuntimeError("persistent Planner already exists — use --reuse")
             if allow_plan_twin:
                 raise RuntimeError(
-                    "Plan is busy — spawn a temporary twin with --lifecycle temporary "
+                    "Planner is busy — spawn a temporary twin with --lifecycle temporary "
                     "(allowPlanTempTwin=true), or wait/queue"
                 )
             raise RuntimeError("Plan busy — queue (allowPlanTempTwin=false)")
@@ -193,7 +193,7 @@ def spawn_specialist(
     data.setdefault("instances", []).append(row)
     save_sessions(root, data)
     ctl.bus_run(root, ["init", instance_name])
-    if resolved_lifecycle == "persistent" or role in ("plan", "work"):
+    if resolved_lifecycle == "persistent" or role in ("planner", "worker"):
         try:
             subprocess.run(
                 [

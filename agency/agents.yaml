@@ -30,7 +30,7 @@ agents:
     binding: layered
     intercomName: researcher
     lifecycleDefault: temporary
-    peers: [brainstorm, plan, scout]
+    peers: [brainstorm, planner, scout]
     # Read-only research: web + read/search tools, no write/edit/bash
     tools: read,grep,find,ls,web_search,fetch_content,agency_report,agency_ask,agency_progress
 
@@ -41,27 +41,27 @@ agents:
     binding: layered
     intercomName: brainstorm
     lifecycleDefault: temporary
-    peers: [plan, docrev]
+    peers: [planner, docrev]
     tools: default
 
-  plan:
-    charterPath: .pi/agency/charters/plan.md
-    agentPath: .pi/agents/plan.md
+  planner:
+    charterPath: .pi/agency/charters/planner.md
+    agentPath: .pi/agents/planner.md
     skillPath: vendor/compound-engineering/skills/ce-plan/SKILL.md
     binding: layered
-    intercomName: plan
+    intercomName: planner
     lifecycleDefault: persistent
-    peers: [brainstorm, work, scout]
+    peers: [brainstorm, worker, scout]
     tools: default
 
-  work:
-    charterPath: .pi/agency/charters/work.md
-    agentPath: .pi/agents/work.md
+  worker:
+    charterPath: .pi/agency/charters/worker.md
+    agentPath: .pi/agents/worker.md
     skillPath: vendor/compound-engineering/skills/ce-work/SKILL.md
     binding: layered
-    intercomName: work
+    intercomName: worker
     lifecycleDefault: persistent
-    peers: [plan, debug, coderev]
+    peers: [planner, debug, coderev]
     tools: default
 
   debug:
@@ -71,7 +71,7 @@ agents:
     binding: layered
     intercomName: debug
     lifecycleDefault: temporary
-    peers: [work, coderev]
+    peers: [worker, coderev]
     tools: default
 
   coderev:
@@ -91,15 +91,15 @@ agents:
     binding: layered
     intercomName: docrev
     lifecycleDefault: temporary
-    peers: [brainstorm, plan, coderev]
+    peers: [brainstorm, planner, coderev]
     tools: default
 
 spawn:
   maxSpecialistPanes: 6
   cwd: project-root
   intercomReadyTimeoutSec: 60
-  # Twin policy (v0): when persistent Plan is working, Orchestrator may spawn one
-  # temporary plan-t* if under maxSpecialistPanes. Work never twins.
+  # Twin policy (v0): when persistent Planner is working, Orchestrator may spawn one
+  # temporary planner-t* if under maxSpecialistPanes. Worker never twins.
   allowPlanTempTwin: true
   allowWorkTwin: false
   maxTempTwinsPerRole: 1

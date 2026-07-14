@@ -136,8 +136,8 @@ def test_idle_teardown_skips_non_temporary(tmp_path: Path, monkeypatch):
                 "version": 1,
                 "instances": [
                     {
-                        "intercomName": "plan",
-                        "role": "plan",
+                        "intercomName": "planner",
+                        "role": "planner",
                         "lifecycle": "persistent",
                         "status": "idle",
                     }
@@ -169,5 +169,5 @@ def test_idle_teardown_skips_non_temporary(tmp_path: Path, monkeypatch):
 
     buf = io.StringIO()
     with redirect_stdout(buf):
-        assert recovery.cmd_idle_teardown(Namespace(name="plan", reason=None, idle_sec=300)) == 0
+        assert recovery.cmd_idle_teardown(Namespace(name="planner", reason=None, idle_sec=300)) == 0
     assert "not-temporary" in buf.getvalue()

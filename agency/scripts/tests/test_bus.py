@@ -68,7 +68,7 @@ def test_acl_deny_non_hub_peer(agency_tmp: Path):
         Namespace(
             type="delegate",
             from_name="scout-t01",
-            to="plan",
+            to="planner",
             task_id="t",
             workflow_id=None,
             correlation_id=None,

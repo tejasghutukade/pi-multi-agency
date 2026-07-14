@@ -44,5 +44,5 @@ Never use shell bus commands or pi-intercom for agency traffic. Always report be
 - Key files / areas: (paths)
 - Patterns / constraints found:
 - Risks / unknowns:
-- Suggested next specialist: brainstorm | plan | none
+- Suggested next specialist: brainstorm | planner | none
 ```

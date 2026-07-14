@@ -50,11 +50,11 @@ CTL="python3 /path/to/multi-agency/agency/scripts/agency_ctl.py"
 
 | User intent | Typical sequence |
 |-------------|------------------|
-| Explore / recon | Scout (`repo-recon` / `prior-art` / `reference-repo`) → optional Brainstorm/Plan |
-| External research / docs / prior-art / library internals | Researcher (multi-purpose; cited brief) → Brainstorm/Plan as needed |
-| Scope / WHAT | Scout (if thin) → Brainstorm → Plan |
-| Implementation / HOW | Plan (reuse + memory NOTES) → Work |
-| Bug | Debug → Work if writer needed |
+| Explore / recon | Scout (`repo-recon` / `prior-art` / `reference-repo`) → optional Brainstorm/Planner |
+| External research / docs / prior-art / library internals | Researcher (multi-purpose; cited brief) → Brainstorm/Planner as needed |
+| Scope / WHAT | Scout (if thin) → Brainstorm → Planner |
+| Implementation / HOW | Planner (reuse + memory NOTES) → Worker |
+| Bug | Debug → Worker if writer needed |
 | Review | CodeRev / DocRev |
 
 Scout modes: see `.pi/agency/skills/scout/SKILL.md`. ce-ideate → Brainstorm; ce-sweep is not Scout.
@@ -66,17 +66,17 @@ Ask the user yourself when needed. Specialists escalate via `agency_ask`; the li
 
 See `.pi/agency/memory-spec.md`.
 
-- On Plan/Work spawn or reuse: ensure `.pi/agency/memory/<name>/NOTES.md` exists; put `memoryPath` in delegate `contextPaths`.
-- After Work ships a durable learning: ask Work (or follow up) to run ce-compound → `docs/solutions/` (paths only in the report).
+- On Planner/Worker spawn or reuse: ensure `.pi/agency/memory/<name>/NOTES.md` exists; put `memoryPath` in delegate `contextPaths`.
+- After Worker ships a durable learning: ask Worker (or follow up) to run ce-compound → `docs/solutions/` (paths only in the report).
 
 ## Lifecycle (when)
 
 | Default | Roles |
 |---------|--------|
 | temporary | scout, brainstorm, debug, coderev, docrev, **researcher** |
-| persistent | plan, work |
+| persistent | planner, worker |
 
-Overrides: user keep/one-off; 2+ tasks this workflow → persistent; second related temp task → **promote**. Never a second Work while one is `working`.
+Overrides: user keep/one-off; 2+ tasks this workflow → persistent; second related temp task → **promote**. Never a second Worker while one is `working`.
 
 ## Open vs reuse (how)
 
@@ -85,8 +85,8 @@ Before every delegation for role `R`:
 1. `agency_list` / `$CTL list`.
 2. Idle healthy instance of `R` → **reuse**: `agency_spawn` with `reuse=true` (or skip spawn) then `agency_delegate`.
 3. Manifest row but pane dead → stale cleared by list/reconcile; then spawn.
-4. Work already present/`working` → **queue** (never twin).
-5. Plan `working` and you need another Plan task → spawn **one** temp `plan-t*` twin (`lifecycle: temporary`) if under max 6 panes; else queue.
+4. Worker already present/`working` → **queue** (never twin).
+5. Planner `working` and you need another Planner task → spawn **one** temp `planner-t*` twin (`lifecycle: temporary`) if under max 6 panes; else queue.
 6. Under `spawn.maxSpecialistPanes` (6) → **spawn**; else refuse.
 
 See `agents.yaml` `spawn.allowPlanTempTwin` / `allowWorkTwin`.
@@ -101,7 +101,7 @@ agency_spawn({ role, lifecycle?, reuse: true, direction: "right" })
 
 CLI equivalent: `$CTL spawn --role <role> [--lifecycle …] [--reuse]`.
 
-Names: persistent = role id (`plan`); temporary = `role-t{4 hex}`. Extension owns cmux split, `sessions.json`, and boots:
+Names: persistent = role id (`planner`); temporary = `role-t{4 hex}`. Extension owns cmux split, `sessions.json`, and boots:
 
 `pi --approve --name <instance> --append-system-prompt .pi/agents/<role>.md [--tools …]`
 
@@ -170,15 +170,15 @@ agency_release({ name, mode: "auto" | "idle" | "teardown" })
 
 1. Scout **temporary** → spawn → delegate → **stay free** → pushed report → **teardown**
 2. Brainstorm → delegate with scout artifact paths → pushed report
-3. Plan **persistent** → delegate → pushed report → idle → **second follow-up** without respawn
-4. Release Plan when done
+3. Planner **persistent** → delegate → pushed report → idle → **second follow-up** without respawn
+4. Release Planner when done
 
 ## Do not
 
 - Use pi-intercom as the agency transport
 - Let specialists message the user
 - Paste full CE `SKILL.md` into system prompts
-- Spawn a second Work while one is working
+- Spawn a second Worker while one is working
 - Exceed 6 specialist panes
 - Leave `starting` rows orphaned
 - Paste full JSON envelopes into cmux TTYs

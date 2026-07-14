@@ -31,7 +31,7 @@ def spawn_env(tmp_path: Path, monkeypatch):
   scout:
     lifecycleDefault: temporary
     peers: [orchestrator]
-  plan:
+  planner:
     lifecycleDefault: persistent
     peers: [orchestrator]
 spawn:
@@ -80,16 +80,16 @@ def test_dry_run_creates_idle_row(spawn_env: Path):
 
 def test_spawn_nudge_is_noop_compatibility_arg():
     assert asp.spawn_specialist.__kwdefaults__["nudge"] is False
-    text = asp.bootstrap_text("work", None, ".pi/agency/charters/work.md", None, "/tmp/agency")
+    text = asp.bootstrap_text("worker", None, ".pi/agency/charters/worker.md", None, "/tmp/agency")
     assert "nudge" not in text.lower()
     assert "$BUS" not in text
 
 
 def test_bootstrap_uses_broker_tools_only(spawn_env: Path):
     text = asp.bootstrap_text(
-        "work",
+        "worker",
         None,
-        ".pi/agency/charters/work.md",
+        ".pi/agency/charters/worker.md",
         None,
         str(spawn_env),
     )
