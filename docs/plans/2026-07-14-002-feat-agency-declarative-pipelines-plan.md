@@ -26,7 +26,7 @@ What exists and is reused: `agency_ctl.py` already has `spawn` / `delegate` / `w
 
 - **R1** — Pipelines are defined declaratively in a per-project `pipelines.yaml` (multitenant: each project's `.pi/agency/` carries its own), not hardcoded in code or prose.
 - **R2** — A pipeline run advances stages in order using the existing `spawn → delegate → wait` primitives; advancement is **deterministic and model-independent** (no LLM decides the next stage).
-- **R3** — Every stage has a unique pipeline-local `id`; `inputs` references earlier stage IDs and named artifacts. The runner validates those references and passes the resolved, project-contained paths via `contextPaths`.
+- **R3** — Every stage has a unique pipeline-local `id` and declares named `outputs`; `inputs` references earlier stage IDs and their declared outputs. The runner validates those references and passes resolved, project-contained paths via `contextPaths`.
 - **R4** — Pipeline authority is bound to a live registered `pipeline-runner` surface and its active pipeline ID. A caller-supplied flag alone never bypasses the orchestrator surface gate.
 - **R5** — Pipeline state is written atomically, one active run is enforced per project, and resume reconciles a previously dispatched task before considering any retry.
 - **R6** — The lifecycle bridge suppresses only exact, state-owned intermediate `report` envelopes. Pipeline `ask` envelopes remain visible, and only the bound runner can emit the final completion report.
@@ -49,6 +49,9 @@ What exists and is reused: `agency_ctl.py` already has `spawn` / `delegate` / `w
 - **KTD12 — v1 performs no automatic stage retries.** (session-settled: user-approved — chosen over opt-in idempotent retry and unconditional retry: uncertain side effects enter `needs_attention`; operators explicitly retry after assessment.)
 - **KTD13 — Each pipeline uses a temporary runner.** (session-settled: user-approved — chosen over a persistent idle runner: terminal `done`/`failed` releases the runner and lock; `needs_attention` keeps it registered for inspect/resume/abandon.)
 - **KTD14 — Pipeline state is implemented before and imported by the driver, never the reverse.** (session-settled: user-approved — chosen over driver-first stubs and a combined module: `pipeline_state.py` owns persistence/locking/transitions/queries; runner and bridge consume that API.)
+- **KTD15 — Every stage declares its named outputs in `pipelines.yaml`.** (session-settled: user-approved — chosen over runtime-only selector validation and a single implicit artifact: U1 can reject unknown selectors before opening panes.)
+- **KTD16 — The existing `agency_report` tool is extended backward-compatibly with optional structured result fields.** (session-settled: user-approved — chosen over JSON-in-prose and a second pipeline-report tool: pipeline tasks require `status`, `artifacts`, and optional `error`; ordinary reports retain `summary`/`output`.)
+- **KTD17 — The existing `agency_spawn` tool accepts optional pipeline initialization for `pipeline-runner`.** (session-settled: user-approved — chosen over state creation during delegate and CLI-only initiation: spawn validates name/topic, allocates ID, locks and writes initial state, then opens the waiting process.)
 
 **KTD4 clarification:** for v1, "reusing `recovery.py` stale-detection patterns" means pane/task liveness reconciliation. Time-based stale classification is deferred with the standalone supervisor daemon.
 
@@ -109,7 +112,7 @@ Artifact names are unique; paths must normalize inside the project/artifact root
 - **Requirements:** R1, R3, R8.
 - **Dependencies:** none.
 - **Files:** `agency/scripts/catalog.py` (add `load_pipelines` + validation), new per-project `.pi/agency/pipelines.yaml`, `agency/kit/pipelines.yaml` (template seeded by `agency_init --force`).
-- **Approach:** Add `load_pipelines(root)` to `catalog.py` using the same YAML loading pattern as `load_agents`, then validate unique stage IDs, known roles, prior-stage-only input references, known artifact names, `onFailure`, and supported `{topic}` substitution. Schema:
+- **Approach:** Add `load_pipelines(root)` to `catalog.py` using the same YAML loading pattern as `load_agents`, then validate unique stage IDs, non-empty unique output names, known roles, prior-stage-only input references, selectors against the referenced stage's declared outputs, `onFailure`, and supported `{topic}` substitution. Schema:
   ```yaml
   pipelines:
     implementation:
@@ -119,22 +122,26 @@ Artifact names are unique; paths must normalize inside the project/artifact root
         - id: scout
           role: scout
           goal: "Scout: {topic}"
+          outputs: [primary]
           inputs: []
         - id: plan
           role: planner
           goal: "Plan: {topic}"
+          outputs: [primary]
           inputs:
             - stage: scout
               artifacts: [primary]
         - id: implement
           role: worker
           goal: "Implement: {topic}"
+          outputs: [primary]
           inputs:
             - stage: plan
               artifacts: [primary]
         - id: review
           role: coderev
           goal: "Review: {topic}"
+          outputs: [primary]
           inputs:
             - stage: implement
               artifacts: [primary]
@@ -144,7 +151,7 @@ Artifact names are unique; paths must normalize inside the project/artifact root
 - **Test scenarios:**
   - Happy path: the four-stage sample parses with stable IDs and named input selectors.
   - Missing file returns `{}`; malformed YAML and unsupported keys fail clearly.
-  - Duplicate stage IDs, duplicate artifact selectors, unknown/forward stage references, unknown roles, and invalid `onFailure` fail validation before any pane is opened.
+  - Duplicate stage IDs, empty/duplicate/invalid output names, duplicate selectors, unknown/forward stage references, selectors for undeclared outputs, unknown roles, and invalid `onFailure` fail before any pane is opened.
   - Two project fixtures load only their own pipelines.
 - **Verification:** `python3 -m pytest agency/scripts/tests/test_catalog.py -k pipeline` passes.
 
@@ -182,8 +189,8 @@ Artifact names are unique; paths must normalize inside the project/artifact root
 - **Goal:** Advance validated stages through spawn→delegate→wait using stable task IDs and a required result contract.
 - **Requirements:** R2, R3, R5, R6, R8, KTD1, KTD6, KTD8, KTD12, KTD14.
 - **Dependencies:** U1, U5, U3, U2.
-- **Files:** `agency/scripts/pipeline_runner.py` (new), `agency/scripts/agency_ctl.py` (thin command entry), stage-report validation helpers/tests.
-- **Approach:** For each stage, resolve named inputs, persist `dispatched` with a stable task ID before delegation, spawn/reuse under authenticated authority, delegate, and wait/reconcile. Accept only a report from the expected stage instance with matching pipeline/stage/task identity and payload `{status, summary, artifacts, error?}`. Validate artifact names, existence, and project-root containment before saving or forwarding them. The final bound-runner report carries overall status, final-stage summary, every stage outcome, and accumulated named artifact paths—not merely a completion string.
+- **Files:** `agency/scripts/pipeline_runner.py` (new), `agency/scripts/agency_ctl.py` (thin command entry), `extensions/multi-agency/index.ts` + extension tests (backward-compatible `agency_report` fields), stage-report validation helpers/tests.
+- **Approach:** Extend `agency_report` with optional `status`, `artifacts`, and `error`; require them only when the task ID belongs to an active pipeline, while ordinary reports retain `summary`/`output`. For each stage, resolve named inputs, persist `dispatched` with a stable task ID before delegation, spawn/reuse under authenticated authority, delegate, and wait/reconcile. Accept only a report from the expected stage instance with matching pipeline/stage/task identity and payload `{status, summary, artifacts, error?}`. Validate returned names against that stage's declared outputs plus path existence/containment before saving or forwarding. The final bound-runner report carries overall status, final-stage summary, every stage outcome, and accumulated named artifact paths—not merely a completion string.
 - **Failure policy:** No automatic retry. A valid failed report records `failed`; `onFailure: stop` terminates the run, while `continue` marks stages with failed required inputs `dependency_failed` and allows later independent stages. Timeout, dead pane, malformed report, or missing required artifacts record `needs_attention`. Resume reconciles existing state/report only; an explicit operator retry is a new attempt after side-effect assessment.
 - **Patterns to follow:** `cmd_delegate` for envelopes; `cmd_wait` for broker blocking and pane-dead detection.
 - **Test scenarios:**
@@ -217,7 +224,7 @@ Artifact names are unique; paths must normalize inside the project/artifact root
 - **Goal:** Keep the orchestrator hands-off without trusting a spoofable task-ID prefix or hiding asks.
 - **Requirements:** R6, KTD5, KTD9.
 - **Dependencies:** U4 and U5.
-- **Files:** `agency/scripts/lifecycle_bridge.py`, pipeline-state lookup helpers, `skills/agency-orchestrator/SKILL.md`.
+- **Files:** `agency/scripts/lifecycle_bridge.py`, `agency/scripts/hub_delivery.py` (shared ownership predicate before claim/push), pipeline-state lookup helpers, `skills/agency-orchestrator/SKILL.md`.
 - **Approach:** For `report` envelopes only, suppress delivery when active pipeline state matches the exact pipeline ID, stage task ID, expected sender instance, and bound runner ownership. Treat `pl-` as naming only. Always deliver `ask` envelopes. Accept a final completion report only from the bound runner instance for that pipeline; unrelated prefixed reports and forged final IDs remain visible/rejected rather than silently trusted.
 - **Patterns to follow:** `hub_inbox_envelopes` type filtering plus durable ownership lookup.
 - **Test scenarios:**
@@ -232,8 +239,8 @@ Artifact names are unique; paths must normalize inside the project/artifact root
 - **Goal:** Make the same pipeline flow discoverable from both the orchestrator and the CLI.
 - **Requirements:** R1, R6, R7, R8.
 - **Dependencies:** U1 → U5 → U3 → U2 → U4 → U6.
-- **Files:** `skills/agency-orchestrator/SKILL.md`, `agency/scripts/agency_ctl.py` (documented user start command), `agency/kit/pipelines.yaml`, pipeline integration tests, `docs/architecture.md`.
-- **Approach:** Add the orchestrator intent: validate/create initial state, spawn the temporary waiting runner, then delegate pipeline ID/name/topic and require its claim acknowledgement. Add `agency_ctl run-pipeline --name <pipeline> --topic <text>` as the user entry into the same sequence—no alternate execution semantics and no new native tool. Seed the validated four-stage example. Document final synthesis, `needs_attention`, explicit retry, resume, and abandon flows.
+- **Files:** `skills/agency-orchestrator/SKILL.md`, `agency/scripts/agency_ctl.py` (documented user start command), `extensions/multi-agency/index.ts` + extension tests (optional pipeline initialization on `agency_spawn`), `agency/pipelines.yaml`, pipeline integration tests, `docs/architecture.md`.
+- **Approach:** Extend existing `agency_spawn` with optional `{name, topic}` pipeline initialization valid only for role `pipeline-runner`; it validates config, allocates the ID, acquires the lock, writes initial state, opens the waiting process, and returns the ID. The orchestrator then sends the matching assignment with `agency_delegate` and requires claim acknowledgement. Add `agency_ctl run-pipeline --name <pipeline> --topic <text>` as the user entry into the same sequence—no alternate execution semantics and no new native tool. Seed the validated four-stage example. Document final synthesis, `needs_attention`, explicit retry, resume, and abandon flows.
 - **Test scenarios:**
   - Orchestrator-triggered and user-triggered runs produce the same state/envelopes for equivalent input.
   - Four-stage integration inherits selected named artifacts and emits one complete final synthesis.
@@ -244,11 +251,11 @@ Artifact names are unique; paths must normalize inside the project/artifact root
 ## Definition of Done
 
 - KTD11–KTD14 are implemented exactly: delegate-claim handshake, no automatic retry, temporary runner lifecycle, and state-first one-way dependencies.
-- `pipelines.yaml` validates unique stage IDs, named prior-stage artifact selectors, known roles, and failure policy before opening panes.
+- `pipelines.yaml` validates unique stage IDs, declared outputs, named prior-stage artifact selectors, known roles, and failure policy before opening panes.
 - Orchestrator and user CLI entry paths create the same deterministic run; no LLM decides stage advancement.
 - Runner authority is bound to a live registered surface + active pipeline ID; unauthenticated callers and stale/mismatched runners fail closed.
 - No project-controlled shell command reaches process launch; the runner uses a code-owned fixed argv.
-- Stage reports satisfy the required status/summary/named-artifact contract; inherited paths exist and remain inside the allowed root.
+- The backward-compatible `agency_report` extension enforces status/summary/declared-artifact results for pipeline tasks; inherited paths exist and remain inside the allowed root.
 - `pipelines.json` is atomically persisted, prior valid state survives interrupted writes, and a per-project lock enforces one active run.
 - Resume reconciles dispatched tasks and never blindly repeats uncertain non-idempotent work.
 - Only state-owned intermediate reports are filtered; asks remain visible; exactly one bound-runner final synthesis is delivered.
