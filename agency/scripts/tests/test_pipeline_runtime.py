@@ -989,11 +989,37 @@ def test_attention_notifier_uses_exact_ask_route_task_and_payload(
         lambda root, args: calls.append((root, args)) or {"ok": True},
     )
     synthesis = {"status": "needs_attention", "summary": "inspect stage"}
+    # A run whose current stage asked the question (error) and did partial work.
+    run = {
+        "pipelineId": PIPELINE_ID,
+        "finalTaskId": f"pipe-done-{PIPELINE_ID}",
+        "currentStageId": "work",
+        "stages": [
+            {
+                "id": "work",
+                "role": "worker",
+                "taskId": f"pl-{PIPELINE_ID}-s1",
+                "assignedInstance": "worker-t1",
+                "status": "needs_attention",
+                "summary": "scaffolded module A",
+                "artifacts": {"notes": "notes.md"},
+                "error": "which approach?",
+                "operatorResponse": None,
+            }
+        ],
+    }
     runtime._notify_attention(
         tmp_path,
         RUNNER,
-        {"finalTaskId": f"pipe-done-{PIPELINE_ID}"},
+        run,
         synthesis,
+        question="which approach?",
+        options=["A", "B"],
+        context={
+            "stageId": "work",
+            "summary": "scaffolded module A",
+            "artifacts": {"notes": "notes.md"},
+        },
     )
     args = calls[0][1]
     assert args[args.index("--from") + 1] == RUNNER
@@ -1003,6 +1029,11 @@ def test_attention_notifier_uses_exact_ask_route_task_and_payload(
     assert "--require-caller" in args
     payload = json.loads(args[args.index("--payload-json") + 1])
     assert isinstance(payload["message"], str) and payload["message"]
+    assert payload["question"] == "which approach?"
+    assert payload["options"] == ["A", "B"]
+    assert payload["context"]["stageId"] == "work"
+    assert payload["context"]["summary"] == "scaffolded module A"
+    assert payload["context"]["artifacts"] == {"notes": "notes.md"}
     assert payload["synthesis"] == synthesis
 
 
