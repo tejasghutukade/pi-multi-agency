@@ -159,6 +159,7 @@ def attention_driver(agency, project, pipeline_id, owner, control, **kwargs):
         "needs_attention",
         lock_owner=owner,
         error="operator review required",
+        question="operator review required",
     )
     return {
         "pipelineId": pipeline_id,
@@ -430,6 +431,7 @@ def test_resume_quarantines_poison_report_then_accepts_authenticated_report(
         "needs_attention",
         lock_owner=RUNNER,
         error="malformed first report",
+        question="malformed first report",
     )
     artifact = project / "corrected.md"
     artifact.write_text("corrected")
@@ -1004,7 +1006,9 @@ def test_attention_notifier_uses_exact_ask_route_task_and_payload(
                 "summary": "scaffolded module A",
                 "artifacts": {"notes": "notes.md"},
                 "error": "which approach?",
+                "question": "which approach?",
                 "operatorResponse": None,
+                "options": None,
             }
         ],
     }

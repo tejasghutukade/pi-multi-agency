@@ -453,6 +453,7 @@ def test_pending_can_enter_undispatched_attention(tmp_path: Path):
         "needs_attention",
         lock_owner="owner-1",
         error="catalog changed",
+        question="catalog changed",
     )
     assert stage["assignedInstance"] is None
     assert stage["dispatchedAt"] is None
@@ -539,7 +540,10 @@ def test_resume_classification_reconciles_or_escalates_without_retry(tmp_path: P
     ) == state.ResumeAction.NEEDS_ATTENTION
     escalated = state.get_run(tmp_path, "p-123")["stages"][0]
     assert escalated["status"] == "needs_attention"
-    assert "No report" in escalated["error"]
+    # Review finding #7: the human-facing reason lives on `question`, and the
+    # machine-facing `error` is NOT overloaded with it (stays None here).
+    assert "No report" in escalated["question"]
+    assert escalated["error"] is None
     # U8: a needs_attention stage that received an operator response is re-dispatched
     # (operator-driven continuation, NOT a silent runner retry). Re-dispatch goes
     # through transition_stage(dispersed, assigned_instance=...), not record_dispatched.
@@ -576,6 +580,7 @@ def test_late_report_reconciliation_is_narrow_and_requires_prior_dispatch(tmp_pa
         "needs_attention",
         lock_owner="owner-1",
         error="timeout",
+        question="timeout",
     )
     attention = state.get_run(tmp_path, "p-123")["stages"][0]
     calls = []
@@ -602,7 +607,7 @@ def test_late_report_reconciliation_is_narrow_and_requires_prior_dispatch(tmp_pa
 def test_undispatched_attention_does_not_query_for_resume(tmp_path: Path):
     create(tmp_path)
     state.transition_stage(
-        tmp_path, "p-123", "scout", "needs_attention", lock_owner="owner-1", error="before spawn"
+        tmp_path, "p-123", "scout", "needs_attention", lock_owner="owner-1", error="before spawn", question="before spawn"
     )
     stage = state.get_run(tmp_path, "p-123")["stages"][0]
     assert state.classify_resume(
@@ -663,7 +668,7 @@ def test_schema_rejects_forged_task_ids_and_active_stage_layouts(tmp_path: Path)
         error="boom",
     )
     attention = stopped_attention["runs"][0]["stages"][1]
-    attention.update(status="needs_attention", completedAt=timestamp, error="forged continuation")
+    attention.update(status="needs_attention", completedAt=timestamp, error="forged continuation", question="forged continuation")
     stopped_attention["runs"][0]["status"] = "needs_attention"
     stopped_attention["runs"][0]["currentStageId"] = "implement"
     with pytest.raises(state.PipelineStateValidationError, match="stopped policy cannot continue"):
@@ -774,7 +779,9 @@ def _valid_terminal_run(pipeline_id: str) -> dict:
                 "summary": "done",
                 "artifacts": {},
                 "error": None,
+                "question": None,
                 "operatorResponse": None,
+                "options": None,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
                 "dispatchedAt": timestamp,

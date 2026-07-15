@@ -8,6 +8,9 @@ from typing import Any
 
 import pytest
 
+import agency_ctl as ctl
+import ledger
+import pipeline_runtime
 import pipeline_runner as runner
 import pipeline_state as state
 
@@ -279,7 +282,9 @@ def test_operational_catalog_drift_halts_before_spawn(tmp_path: Path, field: str
     result = runner.run_pipeline(agency, project, PIPELINE_ID, OWNER, fake)
     assert result["status"] == "needs_attention"
     assert not fake.events
-    assert "catalog" in result["stages"][0]["error"]
+    # Review finding #7: catalog-drift reason lives on `question`, `error` stays None.
+    assert "catalog" in result["stages"][0]["question"]
+    assert result["stages"][0]["error"] is None
 
 
 def test_stored_definition_digest_mismatch_halts_before_spawn(tmp_path: Path):
@@ -290,7 +295,9 @@ def test_stored_definition_digest_mismatch_halts_before_spawn(tmp_path: Path):
     fake = FakeControlPlane()
     synthesis = runner.run_pipeline(agency, project, PIPELINE_ID, OWNER, fake)
     assert synthesis["status"] == "needs_attention"
-    assert "digest" in synthesis["stages"][0]["error"]
+    # Review finding #7: digest-mismatch reason lives on `question`, `error` stays None.
+    assert "digest" in synthesis["stages"][0]["question"]
+    assert synthesis["stages"][0]["error"] is None
     assert not fake.events
 
 
@@ -471,6 +478,106 @@ def test_execution_uncertainty_needs_attention(tmp_path: Path, uncertainty: str)
         assert synthesis["stages"][0]["instance"] == "scout-t1"
 
 
+def test_needs_attention_report_options_persist_end_to_end(tmp_path: Path):
+    """Regression for review finding #6: a stage agent's offered choices must
+    survive from the needs_attention report through the durable stage and the
+    synthesis, so the operator entry can present them to ask_user (U8.2
+    options contract). Previously options were dropped at _persist_result and
+    the serve path hardcoded options=[].
+    """
+    definition = stage_definition()
+    agency, project = setup_run(tmp_path, definition)
+    # Drive the real report-validation + persist path used by run_pipeline.
+    task = f"pl-{PIPELINE_ID}-s1"
+    state.record_dispatched(agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1")
+    result = runner.validate_stage_report(
+        envelope=report(
+            task, "scout-t1", {"primary": write_artifact(project, "out.md")},
+            status="needs_attention",
+            question="which approach?",
+            options=["approach A", "approach B"],
+        ),
+        expected_task_id=task,
+        expected_sender="scout-t1",
+        declared_outputs=["primary"],
+        project_root=project,
+    )
+    assert result["options"] == ["approach A", "approach B"]
+    runner._persist_result(
+        agency, state.get_run(agency, PIPELINE_ID), {"id": "only"}, result, OWNER, reconciled=False
+    )
+    run = state.get_run(agency, PIPELINE_ID)
+    stage = next(s for s in run["stages"] if s["id"] == "only")
+    # The durable stage persists the offered choices.
+    assert stage["status"] == "needs_attention"
+    assert stage["options"] == ["approach A", "approach B"]
+    # The synthesis carries them too.
+    assert runner.synthesize_run(run)["stages"][0]["options"] == ["approach A", "approach B"]
+    # options are only valid on a needs_attention stage; a re-dispatch clears them.
+    state.record_operator_response(agency, PIPELINE_ID, "only", "approach A", lock_owner=OWNER)
+    state.transition_stage(agency, PIPELINE_ID, "only", "dispatched", lock_owner=OWNER, assigned_instance="scout-t1")
+    cleared = next(s for s in state.get_run(agency, PIPELINE_ID)["stages"] if s["id"] == "only")
+    assert cleared["options"] is None
+
+
+def test_needs_attention_report_rejects_non_string_options(tmp_path: Path):
+    """validate_stage_report must reject malformed options (defense for #6)."""
+    definition = stage_definition()
+    agency, project = setup_run(tmp_path, definition)
+    task = f"pl-{PIPELINE_ID}-s1"
+    bad = report(
+        task, "scout-t1", {"primary": write_artifact(project, "out.md")},
+        status="needs_attention",
+        question="which approach?",
+        options=["ok", ""],  # blank string is invalid
+    )
+    with pytest.raises(runner.InvalidStageReport):
+        runner.validate_stage_report(
+            envelope=bad,
+            expected_task_id=task,
+            expected_sender="scout-t1",
+            declared_outputs=["primary"],
+            project_root=project,
+        )
+
+
+def test_needs_attention_question_stored_on_own_field_not_error(tmp_path: Path):
+    """Regression for review finding #7: the human-facing question must be persisted
+    on its own `question` field, never overloaded onto `error`, so summary/error
+    consumers never misrender a question as an error."""
+    definition = stage_definition()
+    agency, project = setup_run(tmp_path, definition)
+    task = f"pl-{PIPELINE_ID}-s1"
+    result = runner.validate_stage_report(
+        envelope=report(
+            task, "scout-t1", {"primary": write_artifact(project, "out.md")},
+            status="needs_attention",
+            question="which approach?",
+            error="machine reason: ambiguous scope",  # distinct from the question
+            options=["A", "B"],
+        ),
+        expected_task_id=task,
+        expected_sender="scout-t1",
+        declared_outputs=["primary"],
+        project_root=project,
+    )
+    assert result["question"] == "which approach?"
+    assert result["error"] == "machine reason: ambiguous scope"
+    runner._persist_result(
+        agency, state.get_run(agency, PIPELINE_ID), {"id": "only"}, result, OWNER, reconciled=False
+    )
+    stage = next(
+        s for s in state.get_run(agency, PIPELINE_ID)["stages"] if s["id"] == "only"
+    )
+    # question and error are persisted as separate fields.
+    assert stage["question"] == "which approach?"
+    assert stage["error"] == "machine reason: ambiguous scope"
+    # synthesize_run surfaces them distinctly too.
+    synthesis = runner.synthesize_run(state.get_run(agency, PIPELINE_ID))
+    assert synthesis["stages"][0]["question"] == "which approach?"
+    assert synthesis["stages"][0]["error"] == "machine reason: ambiguous scope"
+
+
 def test_spawn_uncertainty_resume_only_reconciles_and_never_spawns_again(tmp_path: Path):
     agency, project = setup_run(tmp_path, stage_definition())
     first = FakeControlPlane()
@@ -594,7 +701,7 @@ def test_late_report_reconciles_dispatched_attention_once(tmp_path: Path):
     agency, project = setup_run(tmp_path, definition)
     task = f"pl-{PIPELINE_ID}-s1"
     state.record_dispatched(agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1")
-    state.transition_stage(agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER, error="timeout")
+    state.transition_stage(agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER, error="timeout", question="timeout")
     fake = FakeControlPlane({task: report(task, "scout-t1", {"primary": write_artifact(project, "late.md")})})
     synthesis = runner.run_pipeline(agency, project, PIPELINE_ID, OWNER, fake, resume=True)
     assert synthesis["status"] == "succeeded"
@@ -609,7 +716,7 @@ def test_resume_re_dispaches_needs_attention_with_operator_answer(tmp_path: Path
     state.record_dispatched(agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1")
     state.transition_stage(
         agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER,
-        error="which way?", summary="scaffolded the module",
+        error="which way?", question="which way?", summary="scaffolded the module",
     )
     # Operator answered; the answer is bound to the exact stage.
     state.record_operator_response(agency, PIPELINE_ID, "only", "use approach B", lock_owner=OWNER)
@@ -631,7 +738,7 @@ def test_resume_re_dispatch_reuses_instance_when_alive_else_reserves_fresh(tmp_p
     task = f"pl-{PIPELINE_ID}-s1"
     state.record_dispatched(agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1")
     state.transition_stage(
-        agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER, error="q"
+        agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER, error="q", question="q"
     )
     state.record_operator_response(agency, PIPELINE_ID, "only", "ans", lock_owner=OWNER)
     # Surface not alive -> reserve + spawn a fresh instance, then delegate.
@@ -646,11 +753,57 @@ def test_resume_re_dispatch_reuses_instance_when_alive_else_reserves_fresh(tmp_p
     assert fake.payloads[task]["operatorResponse"] == "ans"
 
 
+def test_real_control_plane_surface_alive_resolves_instance_to_cmux_surface(tmp_path: Path, monkeypatch):
+    """Regression: AgencyControlPlane.surface_alive must resolve an intercomName
+    through the ledger to its bound cmuxSurface before consulting cmux.
+
+    The original implementation called the unimported `cmux_pane.surface_alive`
+    directly with the intercomName, which both raised NameError and (with the
+    import fixed) never matched a surface ref. U8.3 resume reuse depended on it.
+    This test drives the REAL method, not the FakeControlPlane mock.
+    """
+    agency, project = setup_run(tmp_path, stage_definition())
+    # Bind a stage instance row to a cmux surface in the live ledger.
+    sessions = {
+        "version": 1,
+        "instances": [
+            {
+                "instanceId": "i-scout-t1",
+                "intercomName": "scout-t1",
+                "role": "scout",
+                "status": "working",
+                "cmuxSurface": "surface:12",
+                "taskId": f"pl-{PIPELINE_ID}-s1",
+            }
+        ],
+    }
+    (agency / "sessions.json").write_text(json.dumps(sessions))
+
+    # Simulate cmux surface liveness by intercepting the wrapped primitive.
+    live = {"surface:12": True, "surface:99": False}
+    monkeypatch.setattr(ctl, "surface_alive", lambda surface: live.get(surface))
+
+    cplane = pipeline_runtime.AgencyControlPlane(agency, project=project)
+
+    # intercomName 'scout-t1' -> cmuxSurface 'surface:12' -> alive
+    assert cplane.surface_alive("scout-t1") is True
+    # unknown instance is not reusable
+    assert cplane.surface_alive("ghost-t9") is False
+    # empty / non-string instance is rejected
+    assert cplane.surface_alive("") is False
+    assert cplane.surface_alive(None) is False
+    # bound to surface:99 (simulated dead) -> not reusable
+    sessions["instances"][0]["cmuxSurface"] = "surface:99"
+    (agency / "sessions.json").write_text(json.dumps(sessions))
+    assert cplane.surface_alive("scout-t1") is False
+
+
+
 def test_dispatched_attention_without_late_report_remains_unchanged(tmp_path: Path):
     definition = stage_definition()
     agency, project = setup_run(tmp_path, definition)
     state.record_dispatched(agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1")
-    state.transition_stage(agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER, error="original")
+    state.transition_stage(agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER, error="original", question="original")
     fake = FakeControlPlane()
     synthesis = runner.run_pipeline(agency, project, PIPELINE_ID, OWNER, fake, resume=True)
     assert synthesis["stages"][0]["error"] == "original"

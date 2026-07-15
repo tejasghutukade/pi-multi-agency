@@ -217,6 +217,7 @@ def test_needs_attention_stage_accepts_a_corrected_report(tmp_path: Path, monkey
         "needs_attention",
         lock_owner="runner",
         error="first report was malformed",
+        question="first report was malformed",
     )
 
     prepared = runtime.prepare_pipeline_report(

@@ -18,6 +18,25 @@ test("report payload omits undefined fields and keeps structured fields", () => 
 	assert.equal(Object.values(payload).includes(undefined), false);
 });
 
+test("report payload supports needs_attention status with question and options", () => {
+	// Regression for review finding #17: the typed tool could not emit
+	// `needs_attention`, so specialists could never ask the operator a question.
+	const payload = buildAgencyReportPayload({
+		status: "needs_attention",
+		summary: "ambiguous scope",
+		artifacts: { primary: "out/draft.md" },
+		question: "which approach?",
+		options: ["A", "B"],
+	});
+	assert.deepEqual(payload, {
+		status: "needs_attention",
+		summary: "ambiguous scope",
+		artifacts: { primary: "out/draft.md" },
+		question: "which approach?",
+		options: ["A", "B"],
+	});
+});
+
 test("report payload preserves legacy output without undefined keys", () => {
 	assert.deepEqual(buildAgencyReportPayload({ output: "ordinary result" }), {
 		output: "ordinary result",

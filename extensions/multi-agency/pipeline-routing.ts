@@ -1,9 +1,11 @@
 export type AgencyReportInput = {
-	status?: "succeeded" | "failed";
+	status?: "succeeded" | "failed" | "needs_attention";
 	summary?: string;
 	output?: string;
 	artifacts?: Record<string, string>;
 	error?: string;
+	question?: string;
+	options?: string[];
 	payloadJson?: string;
 };
 
@@ -17,6 +19,8 @@ export function buildAgencyReportPayload(input: AgencyReportInput): Record<strin
 			output: input.output,
 			artifacts: input.artifacts,
 			error: input.error,
+			question: input.question,
+			options: input.options,
 		}).filter(([, value]) => value !== undefined),
 	);
 }

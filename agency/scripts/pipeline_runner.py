@@ -181,7 +181,7 @@ def build_delegate_payload(
         },
         "expectedOutputs": list(stage_definition["outputs"]),
         "resultContract": {
-            "status": "succeeded|failed",
+            "status": "succeeded|failed|needs_attention",
             "summary": "non-empty string",
             "artifacts": {"declared-output-name": "project-relative-existing-path"},
             "error": "required when failed",
@@ -236,15 +236,15 @@ def validate_stage_report(
     question = payload.get("question")
     options = payload.get("options")
     if status == "needs_attention":
-        # The human-facing question is mandatory; it is stored as the stage error
-        # (the machine-facing reason) so existing attention handling applies.
+        # The human-facing question is mandatory and is stored on its own `question`
+        # field (review finding #7): do NOT overload `error`, so summary/error
+        # consumers never misrender a question as an error. `error` here is an
+        # optional machine-facing reason, kept separate from the question.
         if not isinstance(question, str) or not question.strip():
             raise InvalidStageReport("needs_attention report requires a non-blank question")
         if options is not None:
             if not isinstance(options, list) or not all(isinstance(o, str) and o.strip() for o in options):
                 raise InvalidStageReport("needs_attention options must be a list of non-blank strings")
-        # error is optional here; fall back to the question for storage.
-        error = error or question
     elif status == "failed":
         if not isinstance(error, str) or not error.strip():
             raise InvalidStageReport("failed report requires a non-blank error")
@@ -322,7 +322,10 @@ def _attention(
         stage["id"],
         "needs_attention",
         lock_owner=lock_owner,
-        error=detail or "pipeline execution requires operator attention",
+        # The human-facing reason goes on `question`; `error` is an optional
+        # machine-facing reason and must NOT be overloaded with the question (review
+        # finding #7), so summary/error consumers never misrender a question as an error.
+        question=detail or "pipeline execution requires operator attention",
     )
 
 
@@ -353,9 +356,13 @@ def _persist_result(
         "error": result["error"],
     }
     if result["status"] == "needs_attention":
-        # A needs_attention report carries the human-facing question in `error`
-        # (see validate_stage_report). No operator response exists yet.
+        # A needs_attention report carries the human-facing question on its own
+        # `question` field (review finding #7); do NOT overload `error`.
         kwargs["operator_response"] = None
+        kwargs["question"] = result.get("question")
+        # Persist the offered choices (U8.2 options contract) so the operator
+        # entry can present them to ask_user end-to-end.
+        kwargs["options"] = result.get("options")
     if reconciled:
         pipeline_state.record_reconciled_result(
             agency_root,
@@ -411,6 +418,8 @@ def synthesize_run(run: Mapping[str, Any]) -> dict[str, Any]:
             "summary": stage["summary"],
             "artifacts": dict(stage["artifacts"]),
             "error": stage["error"],
+            "question": stage.get("question") or None,
+            "options": list(stage.get("options") or []),
         }
         for stage in run["stages"]
     ]

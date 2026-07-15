@@ -220,6 +220,13 @@ def _require_optional_string(value: Any, context: str) -> None:
         raise PipelineStateValidationError(f"{context} must be a string or null")
 
 
+def _require_optional_string_list(value: Any, context: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise PipelineStateValidationError(f"{context} must be a list of strings or null")
+
+
 def _validate_lock_record(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PipelineStateValidationError("lock record must be an object")
@@ -393,7 +400,9 @@ def _validate_stage(stage: Any, context: str) -> dict[str, Any]:
         "summary",
         "artifacts",
         "error",
+        "question",
         "operatorResponse",
+        "options",
         "createdAt",
         "updatedAt",
         "dispatchedAt",
@@ -416,16 +425,26 @@ def _validate_stage(stage: Any, context: str) -> dict[str, Any]:
         _validate_identifier(name, f"{context}.artifacts key")
         _require_string(path, f"{context}.artifacts[{name!r}]")
     _require_optional_string(stage.get("error"), f"{context}.error")
+    _require_optional_string(stage.get("question"), f"{context}.question")
     _require_optional_string(stage.get("operatorResponse"), f"{context}.operatorResponse")
-    if status in {"failed", "dependency_failed", "needs_attention"} and (
+    _require_optional_string_list(stage.get("options"), f"{context}.options")
+    if status in {"failed", "dependency_failed"} and (
         not stage["error"] or not stage["error"].strip()
     ):
         raise PipelineStateValidationError(f"{context}: {status} stage requires non-blank error")
+    if status == "needs_attention" and (
+        not stage.get("question") or not stage["question"].strip()
+    ):
+        raise PipelineStateValidationError(f"{context}: needs_attention stage requires non-blank question")
     if status in {"pending", "dispatched", "succeeded"} and stage["error"] is not None:
         raise PipelineStateValidationError(f"{context}: {status} stage cannot have error")
     if status != "needs_attention" and stage["operatorResponse"] is not None:
         raise PipelineStateValidationError(
             f"{context}: operatorResponse is valid only on a needs_attention stage"
+        )
+    if status != "needs_attention" and stage.get("options") is not None:
+        raise PipelineStateValidationError(
+            f"{context}: options is valid only on a needs_attention stage"
         )
     for field in ("createdAt", "updatedAt"):
         _require_string(stage.get(field), f"{context}.{field}")
@@ -843,7 +862,9 @@ def create_run(
                 "summary": "",
                 "artifacts": {},
                 "error": None,
+                "question": None,
                 "operatorResponse": None,
+                "options": None,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
                 "dispatchedAt": None,
@@ -1078,6 +1099,8 @@ def transition_stage(
     artifacts: Mapping[str, str] | None = None,
     error: str | None = None,
     operator_response: str | None = None,
+    options: list[str] | None = None,
+    question: str | None = None,
     assigned_instance: str | None = None,
 ) -> dict[str, Any]:
     _assert_lock(root, pipeline_id, lock_owner)
@@ -1120,7 +1143,7 @@ def transition_stage(
         _require_string(summary, "summary", allow_empty=True)
     if error is not None:
         _require_string(error, "error")
-    if new_status in {"failed", "dependency_failed", "needs_attention"} and (
+    if new_status in {"failed", "dependency_failed"} and (
         not error or not error.strip()
     ):
         raise PipelineStateValidationError(f"{new_status} transition requires error")
@@ -1149,6 +1172,20 @@ def transition_stage(
     elif new_status != "needs_attention" and stage.get("operatorResponse") is not None:
         # A stage that moves out of needs_attention has consumed its answer.
         stage["operatorResponse"] = None
+    if new_status == "needs_attention" and options is not None:
+        # Persist the stage agent's offered choices so the operator entry can
+        # present them to ask_user (U8.2 options contract, end-to-end).
+        stage["options"] = list(options)
+    elif new_status != "needs_attention" and stage.get("options") is not None:
+        stage["options"] = None
+    if new_status == "needs_attention" and question is not None:
+        # Persist the human-facing question on its own field (do NOT overload
+        # `error`); see review finding #7. A machine-facing `error` reason,
+        # if any, is kept separate so summary/error consumers never misrender
+        # a question as an error.
+        stage["question"] = question
+    elif new_status != "needs_attention" and stage.get("question") is not None:
+        stage["question"] = None
     if new_status == "dispatched" and was_needs_attention:
         # Re-dispatch (U8): the prior uncertainty is resolved; drop the stale error
         # so validation does not see a dispatched stage carrying an error.
@@ -1299,6 +1336,8 @@ def reconcile_resume(
             stage_id,
             "needs_attention",
             lock_owner=lock_owner,
-            error=f"No report exists for dispatched task {stage_record['taskId']}; automatic retry is prohibited",
+            # Human-facing reason on `question`; `error` is a separate machine-facing
+            # reason and must NOT be overloaded (review finding #7).
+            question=f"No report exists for dispatched task {stage_record['taskId']}; automatic retry is prohibited",
         )
     return action

@@ -733,11 +733,13 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		promptSnippet: "Report completed agency work to the Orchestrator",
 		parameters: Type.Object({
 			taskId: Type.Optional(Type.String()),
-			status: Type.Optional(StringEnum(["succeeded", "failed"] as const)),
+			status: Type.Optional(StringEnum(["succeeded", "failed", "needs_attention"] as const)),
 			summary: Type.Optional(Type.String()),
 			output: Type.Optional(Type.String()),
 			artifacts: Type.Optional(Type.Record(Type.String(), Type.String())),
 			error: Type.Optional(Type.String()),
+			question: Type.Optional(Type.String()),
+			options: Type.Optional(Type.Array(Type.String())),
 			payloadJson: Type.Optional(Type.String()),
 		}),
 		async execute(_id, params, signal) {

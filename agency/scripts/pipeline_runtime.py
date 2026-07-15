@@ -479,10 +479,22 @@ class AgencyControlPlane:
         return None
 
     def surface_alive(self, instance: str) -> bool:
-        """Reuse a prior stage instance only when its cmux surface is live."""
+        """Reuse a prior stage instance only when its cmux surface is live.
+
+        `instance` is an intercomName/intercomId, not a cmux surface ref, so it
+        must be resolved through the ledger to the bound `cmuxSurface` before the
+        cmux surface query is consulted. Returns False for unknown/!bound rows.
+        """
         if not isinstance(instance, str) or not instance:
             return False
-        return cmux_pane.surface_alive(instance) is True
+        sessions = ledger.load_sessions(self.root)
+        row = ledger.find_instance(sessions, instance)
+        if not row:
+            return False
+        surface = row.get("cmuxSurface")
+        if not surface:
+            return False
+        return ctl.surface_alive(surface) is True
 
     def ack_stage_report(self, receipt: str) -> None:
         if not isinstance(receipt, str) or not receipt:
@@ -982,8 +994,11 @@ def _serve_pipeline_runner_locked(
             instance,
             durable_run,
             synthesis,
-            question=(asking or {}).get("error") or "",
-            options=[],  # stage report options are not durable yet; ask_user is freeform
+            # Use the human-facing `question` only. Per review finding #7, `error`
+            # is a separate machine-facing reason and must NOT be used as a
+            # question fallback, so a real error is never misrendered to the operator.
+            question=(asking or {}).get("question") or "",
+            options=list((asking or {}).get("options") or []),
             context={
                 "stageId": (asking or {}).get("id"),
                 "summary": (asking or {}).get("summary") or "",

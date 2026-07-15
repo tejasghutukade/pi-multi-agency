@@ -216,15 +216,37 @@ def reconcile_cmux(root: Path) -> dict[str, Any]:
 
 
 def ensure_orchestrator(root: Path) -> dict[str, Any]:
+    """Bind or rebind the single persistent orchestrator (HUB) role.
+
+    Role-gating: only the orchestrator surface may mutate the orchestrator row.
+    A non-orchestrator pane (e.g. a rogue specialist) calling an operator command
+    must never rebind or bootstrap the orchestrator. The orchestrator is identified
+    by its session row's role/intercomName == HUB, resolved by the caller surface.
+    """
     data = load_sessions(root)
     instances = list(data.get("instances") or [])
     surface, pane = caller_surface()
-    orch = next((i for i in instances if i.get("role") == HUB or i.get("intercomName") == HUB), None)
-    if orch:
+    orch = next(
+        (i for i in instances if i.get("role") == HUB or i.get("intercomName") == HUB),
+        None,
+    )
+    caller_rows = [r for r in instances if r.get("cmuxSurface") == surface]
+    caller_is_hub = any(
+        (r.get("role") == HUB or r.get("intercomName") == HUB) for r in caller_rows
+    )
+
+    if orch is not None:
+        # The orchestrator already exists. Only its own surface may rebind it.
         if orch.get("cmuxSurface") and orch["cmuxSurface"] != surface:
             raise RuntimeError(
-                f"spawn/release denied: orchestrator is bound to {orch.get('cmuxSurface')}, "
-                f"caller is {surface}"
+                f"spawn/release denied: orchestrator is bound to "
+                f"{orch.get('cmuxSurface')!r}, caller is {surface!r}"
+            )
+        if orch.get("cmuxSurface") is None and not caller_is_hub and caller_rows:
+            # An existing, unbound orchestrator may only be claimed by a HUB surface.
+            raise RuntimeError(
+                f"orchestrator denied: {caller_rows[0].get('intercomName')!r} "
+                f"(not the HUB role) cannot claim the orchestrator"
             )
         orch["cmuxSurface"] = surface
         orch["cmuxPane"] = pane
@@ -233,6 +255,13 @@ def ensure_orchestrator(root: Path) -> dict[str, Any]:
         save_sessions(root, data)
         return orch
 
+    # First claim: no orchestrator row exists yet. Only a HUB caller (or an
+    # unregistered harness surface) may create it; a registered non-HUB pane may not.
+    if caller_rows and not caller_is_hub:
+        raise RuntimeError(
+            f"orchestrator denied: cannot claim orchestrator as "
+            f"{caller_rows[0].get('intercomName')!r} (not the HUB role)"
+        )
     row = {
         "instanceId": f"orchestrator-{secrets.token_hex(4)}",
         "role": HUB,
