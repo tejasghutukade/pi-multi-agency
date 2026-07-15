@@ -28,6 +28,16 @@ function instanceName(identity: AgencyIdentity | null): string | null {
 	return identity?.instance?.intercomName || (identity?.isHub ? "orchestrator" : null);
 }
 
+export function connectedStatusText(identity: AgencyIdentity | null): string {
+	const name = instanceName(identity);
+	if (!name) return "agency: connected";
+	const tags: string[] = [];
+	if (identity?.isHub) tags.push("hub");
+	if (identity?.isTemporary) tags.push("temp");
+	const suffix = tags.length ? ` [${tags.join(" ")}]` : "";
+	return `agency: connected · ${name}${suffix}`;
+}
+
 function statusText(ui: ExtensionContext["ui"] | null, text?: string): void {
 	ui?.setStatus?.("agency-broker", text);
 }
@@ -79,6 +89,7 @@ export class AgencyBrokerRuntime {
 		}
 		if (this.client?.isConnected()) {
 			this.updatePresence(identity);
+			statusText(this.lastUi, connectedStatusText(identity));
 			return;
 		}
 		if (this.connecting) return this.connecting;
@@ -124,7 +135,7 @@ export class AgencyBrokerRuntime {
 			buildAgencyTransportId(requireBrokerContext(this.context), name),
 		);
 		this.client = client;
-		statusText(this.lastUi, undefined);
+		statusText(this.lastUi, connectedStatusText(identity));
 	}
 
 	private scheduleReconnect(): void {
