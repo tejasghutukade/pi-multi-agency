@@ -999,7 +999,7 @@ def main() -> int:
     rp.add_argument("--name", required=True, help="Pipeline name from pipelines.yaml")
     rp.add_argument("--topic", required=True, help="Pipeline topic")
 
-    d = sub.add_parser("delegate", help="Send bus delegate envelope")
+    d = sub.add_parser("delegate", help="Send delegate envelope (broker for agency; file-bus for pipeline)")
     d.add_argument("--to", required=True)
     d.add_argument("--task-id", required=True)
     d.add_argument("--workflow-id")

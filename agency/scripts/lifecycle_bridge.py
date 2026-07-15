@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pi lifecycle bridge helpers (v0.3) — liveness via agent_* events; task truth via bus."""
+"""Pi lifecycle bridge helpers (v0.3) — liveness via agent_* events; broker is the sole agency transport."""
 
 from __future__ import annotations
 
@@ -17,16 +17,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from hub_delivery import (  # noqa: E402
-    ack_delivery,
-    claim_for_delivery,
-    is_state_owned_stage_report,
-)
 from ledger import find_by_surface, find_instance, load_sessions, save_sessions  # noqa: E402
-from specialist_delivery import (  # noqa: E402
-    claim_for_specialist_delivery,
-    pending_for_specialist,
-)
 
 # draft timers from docs/architecture.md
 SILENT_SETTLE_GRACE_SEC = 60
@@ -67,33 +58,6 @@ def import_ctl():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
-
-
-def hub_inbox_envelopes(root: Path, types: set[str] | None = None) -> list[dict[str, Any]]:
-    types = types or {"report", "ask"}
-    out: list[dict[str, Any]] = []
-    for sub in ("pending", "processing"):
-        d = root / "inbox" / HUB / sub
-        if not d.is_dir():
-            continue
-        for p in sorted(d.glob("*.json")):
-            try:
-                env = json.loads(p.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if env.get("type") in types:
-                out.append({"path": str(p), "stage": sub, "envelope": env})
-    out = [x for x in out if not is_state_owned_stage_report(root, x["envelope"])]
-    return out
-
-
-def has_hub_message_for_task(root: Path, task_id: str) -> bool:
-    if not task_id:
-        return False
-    for item in hub_inbox_envelopes(root):
-        if item["envelope"].get("taskId") == task_id:
-            return True
-    return False
 
 
 def cmd_whoami(_args: argparse.Namespace) -> int:
@@ -204,83 +168,6 @@ def cmd_broker_ack(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_pending_hub(_args: argparse.Namespace) -> int:
-    ctl = import_ctl()
-    root = ctl.agency_root()
-    items = [x for x in hub_inbox_envelopes(root) if x["stage"] == "pending"]
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "count": len(items),
-                "messages": [
-                    {
-                        "path": i["path"],
-                        "type": i["envelope"].get("type"),
-                        "from": i["envelope"].get("from"),
-                        "taskId": i["envelope"].get("taskId"),
-                        "createdAt": i["envelope"].get("createdAt"),
-                    }
-                    for i in items
-                ],
-            },
-            indent=2,
-        )
-    )
-    return 0
-
-
-def _resolve_instance_name(ctl: Any, data: dict[str, Any], explicit: str | None) -> str:
-    if explicit:
-        return explicit
-    surface, _ = ctl.caller_surface()
-    inst = find_by_surface(data, surface)
-    name = (inst or {}).get("intercomName")
-    if not name:
-        raise RuntimeError("could not resolve instance name (pass --name)")
-    return str(name)
-
-
-def cmd_pending_specialist(args: argparse.Namespace) -> int:
-    ctl = import_ctl()
-    root = ctl.agency_root()
-    data = ctl.load_sessions(root)
-    name = _resolve_instance_name(ctl, data, getattr(args, "name", None))
-    out = pending_for_specialist(root, name=name)
-    out["instance"] = name
-    print(json.dumps(out, indent=2))
-    return 0
-
-
-def cmd_claim_specialist(args: argparse.Namespace) -> int:
-    ctl = import_ctl()
-    root = ctl.agency_root()
-    data = ctl.load_sessions(root)
-    name = _resolve_instance_name(ctl, data, getattr(args, "name", None))
-    out = claim_for_specialist_delivery(root, name=name, task_id=getattr(args, "task_id", None))
-    out["instance"] = name
-    print(json.dumps(out, indent=2))
-    return 0
-
-
-def cmd_claim_for_delivery(args: argparse.Namespace) -> int:
-    from agency_paths import agency_root as ar
-
-    result = claim_for_delivery(ar(), task_id=getattr(args, "task_id", None))
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-def cmd_ack_delivery(args: argparse.Namespace) -> int:
-    from agency_paths import agency_root as ar
-
-    result = ack_delivery(ar(), Path(args.path))
-    print(json.dumps(result, indent=2))
-    return 0
-
-
-
-
 from recovery import (  # noqa: E402
     TEMP_IDLE_TEARDOWN_SEC,
     cmd_abandon,
@@ -304,21 +191,6 @@ def main() -> int:
     ba.add_argument("--from", dest="from_name", required=True)
     ba.add_argument("--type", required=True, choices=["report", "ask", "progress", "reply", "delegate", "release"])
     ba.add_argument("--task-id")
-
-    sub.add_parser("pending-hub", help="List pending hub report/ask envelopes")
-
-    ps = sub.add_parser("pending-specialist", help="List pending specialist delegate/reply envelopes")
-    ps.add_argument("--name")
-
-    cs = sub.add_parser("claim-specialist", help="Claim one pending specialist delegate/reply for follow-up delivery")
-    cs.add_argument("--name")
-    cs.add_argument("--task-id")
-
-    cl = sub.add_parser("claim-delivery", help="Claim one pending hub message for push")
-    cl.add_argument("--task-id")
-
-    ack = sub.add_parser("ack-delivery", help="Move claimed message to done/")
-    ack.add_argument("--path", required=True)
 
     tick = sub.add_parser("tick", help="Silent-settle tick (grace / nudge / abandon signal)")
     tick.add_argument("--name")
@@ -346,16 +218,6 @@ def main() -> int:
             return cmd_status(args)
         if args.cmd == "broker-ack":
             return cmd_broker_ack(args)
-        if args.cmd == "pending-hub":
-            return cmd_pending_hub(args)
-        if args.cmd == "pending-specialist":
-            return cmd_pending_specialist(args)
-        if args.cmd == "claim-specialist":
-            return cmd_claim_specialist(args)
-        if args.cmd == "claim-delivery":
-            return cmd_claim_for_delivery(args)
-        if args.cmd == "ack-delivery":
-            return cmd_ack_delivery(args)
         if args.cmd == "tick":
             return cmd_tick(args)
         if args.cmd == "abandon":

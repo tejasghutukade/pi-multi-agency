@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compose an agency specialist spawn over catalog / ledger / bus / pi_launch."""
+"""Compose an agency specialist spawn over catalog / ledger / pi_launch."""
 
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ def bootstrap_text(
         f"Agency ownership was established before Pi started at {agency_export}. "
         f'export MEMORY="{memory}"; '
         "All agency messages go through the agency_report / agency_ask / agency_progress tools — "
-        "do NOT call bus.py or any bus script directly. "
+        "the live broker is the sole agency transport, so never read or write the file-bus directly. "
         "Use agency_report / agency_ask / agency_progress for all agency messages. "
         "Prefer built-in tools (read, grep, find, ls) over bash for read-only exploration; "
         "use bash only when no built-in tool can do the job. "

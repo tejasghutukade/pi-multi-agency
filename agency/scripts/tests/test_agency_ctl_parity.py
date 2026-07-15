@@ -48,7 +48,6 @@ def test_lower_modules_do_not_import_agency_ctl():
         "catalog.py",
         "ledger.py",
         "agency_paths.py",
-        "hub_delivery.py",
     ):
         text = (scripts / name).read_text()
         assert "import agency_ctl" not in text

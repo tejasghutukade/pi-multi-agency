@@ -18,7 +18,14 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from cmux_pane import close_surface, send_to_surface  # noqa: E402
-from ledger import clear_instance, find_by_surface, find_instance, load_sessions, save_sessions  # noqa: E402
+from ledger import (  # noqa: E402
+    clear_instance,
+    find_by_surface,
+    find_instance,
+    load_sessions,
+    make_instance_name,
+    save_sessions,
+)
 
 SILENT_SETTLE_GRACE_SEC = 60
 NUDGE_START_WAIT_SEC = 25
@@ -351,19 +358,65 @@ def cmd_abandon(args: argparse.Namespace) -> int:
     payload = last.get("payload") or {}
     workflow_id = last.get("workflowId")
 
-    # teardown without orchestrator gate
+    # Teardown without orchestrator gate (must happen before respawn).
     closed = teardown_instance(ctl, root, inst, keep_pane=bool(args.keep_pane))
+
+    # Resolve the persona/charter/skill the same way agent_spawn does, so the
+    # respawned pane's boot prompt carries identity + the re-delegated task.
+    from agent_spawn import bootstrap_text
+    from catalog import load_agents
+    agents = load_agents(root)
+    agent = (agents.get("agents") or {}).get(role) or {}
+    agent_path = inst.get("agentPath") or agent.get("agentPath")
+    if agent_path:
+        agent_path = Path(agent_path)
+    charter = agent.get("charterPath") or f".pi/agency/charters/{role}.md"
+    skill = agent.get("skillPath")
+    agency_export = str(root)
+
+    # Pre-compute the instance name spawn_specialist will claim (no explicit
+    # name passed), so the boot prompt can name it before the pane exists.
+    boot_name = make_instance_name(str(role), lifecycle)
+
+    # Deliver the task inside the boot prompt (broker-capable path). The
+    # specialist now receives delegates/replies via the broker, and recovery
+    # runs outside the live broker, so the task travels with the spawn instead
+    # of through the (now agency-only-removed) file-bus.
+    boot_parts = [bootstrap_text(boot_name, agent_path, charter, skill, agency_export)]
+    task_lines = [
+        "",
+        "[agency:delegate] from `orchestrator` · taskId `" + str(task_id) + "`",
+        "",
+        "You were respawned after a silent settle. Process this task now.",
+    ]
+    if isinstance(payload, dict):
+        goal = payload.get("goal")
+        if goal:
+            task_lines += ["", "## Goal", str(goal)]
+        if payload.get("contextPaths"):
+            task_lines += ["", "## Context paths"] + [f"- {p}" for p in payload["contextPaths"]]
+        if payload.get("successCriteria"):
+            task_lines += ["", "## Success criteria", str(payload["successCriteria"])]
+        if payload.get("constraints"):
+            task_lines += ["", "## Constraints", str(payload["constraints"])]
+        if payload.get("outputShape"):
+            task_lines += ["", "## Output shape", str(payload["outputShape"])]
+        if payload.get("stopRules"):
+            task_lines += ["", "## Stop rules", str(payload["stopRules"])]
+    boot_msg = "\n".join(boot_parts + task_lines)
 
     from agent_spawn import spawn_specialist
 
     try:
         spawn_out = spawn_specialist(
             str(role),
+            name=boot_name,
             lifecycle=str(lifecycle),
             cwd=str(cwd) if cwd else None,
             recovery=True,
             boot_wait=0,
             nudge=False,
+            message=boot_msg,
         )
     except Exception as e:
         print(
@@ -391,6 +444,9 @@ def cmd_abandon(args: argparse.Namespace) -> int:
         "AGENCY_ROOT": str(root),
         "AGENCY_PROJECT_ROOT": str(ctl.project_root()),
     }
+    # Record routing/bookkeeping metadata only (--no-bus): the task itself was
+    # delivered via the boot prompt above, and the file-bus is no longer the
+    # agency transport, so a bus write here would be dead.
     del_args = [
         sys.executable,
         str(ctl_path),
@@ -402,6 +458,7 @@ def cmd_abandon(args: argparse.Namespace) -> int:
         "--payload-json",
         json.dumps(payload),
         "--recovery",
+        "--no-bus",
     ]
     if workflow_id:
         del_args.extend(["--workflow-id", str(workflow_id)])
@@ -422,32 +479,6 @@ def cmd_abandon(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-
-    # wake hub via bus progress/report system notice
-    notice = {
-        "summary": f"Specialist `{args.name}` abandoned after silent settle (no agent_start after one nudge). "
-        f"Respawned as `{new_name}` and re-delegated taskId `{task_id}`.",
-        "abandoned": args.name,
-        "replacement": new_name,
-        "taskId": task_id,
-        "reason": args.reason or "no-agent_start-after-nudge",
-    }
-    ctl.bus_run(
-        root,
-        [
-            "send",
-            "--from",
-            new_name,
-            "--to",
-            HUB,
-            "--type",
-            "report",
-            "--task-id",
-            str(task_id),
-            "--payload-json",
-            json.dumps(notice),
-        ],
-    )
 
     from agency_events import emit
 
