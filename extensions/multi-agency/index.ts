@@ -596,7 +596,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 		name: "agency_spawn",
 		label: "Agency spawn",
 		description:
-			"Orchestrator-only: spawn or reuse a specialist cmux pane, register sessions.json, init bus inbox, bootstrap pi",
+			"Orchestrator-only: spawn or reuse a specialist cmux pane, register sessions.json, bootstrap pi (broker is the sole agency transport)",
 		promptSnippet: "Spawn or reuse an agency specialist pane",
 		promptGuidelines: [
 			"Only the Orchestrator may call agency_spawn",
