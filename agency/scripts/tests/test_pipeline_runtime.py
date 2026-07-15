@@ -397,7 +397,7 @@ def test_initial_poison_is_quarantined_before_valid_delegate(
         control_plane_factory=lambda root, project: NoopControl(),
         run_pipeline_fn=attention_driver,
         final_sender=lambda *args: pytest.fail("attention must not report"),
-        attention_notifier=lambda *args: None,
+        attention_notifier=lambda *a, **kw: None,
         close_surface_fn=lambda surface: None,
     )
     assert (inbox / "rejected" / poison.name).is_file()
@@ -519,8 +519,8 @@ def test_normal_claim_binds_and_acks_before_driver_then_retains_attention(
         control_plane_factory=lambda root, project: NoopControl(),
         run_pipeline_fn=checked_driver,
         final_sender=lambda *args: final_reports.append(args),
-        attention_notifier=lambda root, sender, run, payload: attention_asks.append(
-            (sender, run["finalTaskId"], payload["status"])
+        attention_notifier=lambda root, sender, run, synthesis, **kw: attention_asks.append(
+            (sender, run["finalTaskId"], synthesis["status"])
         ),
         close_surface_fn=lambda surface: closed.append(surface),
     )
@@ -588,7 +588,7 @@ def test_done_receipt_without_ack_metadata_recovers_before_driver(
         final_sender=lambda *args: pytest.fail(
             "attention recovery must not send a final report"
         ),
-        attention_notifier=lambda *args: None,
+        attention_notifier=lambda *a, **kw: None,
         close_surface_fn=lambda surface: None,
     )
 
@@ -609,8 +609,8 @@ def test_processing_claim_recovers_and_explicit_resume_skips_initial_delegate(
         control_plane_factory=lambda root, project: NoopControl(),
         run_pipeline_fn=attention_driver,
         final_sender=lambda *args: final_reports.append(args),
-        attention_notifier=lambda root, sender, run, payload: attention_asks.append(
-            (sender, run["finalTaskId"], payload["status"])
+        attention_notifier=lambda root, sender, run, synthesis, **kw: attention_asks.append(
+            (sender, run["finalTaskId"], synthesis["status"])
         ),
         close_surface_fn=lambda surface: None,
     )
@@ -642,8 +642,8 @@ def test_processing_claim_recovers_and_explicit_resume_skips_initial_delegate(
         control_plane_factory=lambda root, project: NoopControl(),
         run_pipeline_fn=resumed,
         final_sender=lambda *args: final_reports.append(args),
-        attention_notifier=lambda root, sender, run, payload: attention_asks.append(
-            (sender, run["finalTaskId"], payload["status"])
+        attention_notifier=lambda root, sender, run, synthesis, **kw: attention_asks.append(
+            (sender, run["finalTaskId"], synthesis["status"])
         ),
         close_surface_fn=lambda surface: None,
     )
@@ -677,7 +677,7 @@ def test_whole_serve_guard_blocks_concurrent_claim_and_bind(tmp_path: Path, monk
                 wait_timeout=0,
                 control_plane_factory=lambda root, project: NoopControl(),
                 run_pipeline_fn=blocking_driver,
-                attention_notifier=lambda *args: None,
+                attention_notifier=lambda *a, **kw: None,
                 close_surface_fn=lambda surface: None,
             )["status"]
         )
@@ -778,7 +778,7 @@ def test_terminal_send_precedes_lock_row_cleanup_and_surface_close(tmp_path: Pat
         control_plane_factory=lambda root, project: NoopControl(),
         run_pipeline_fn=terminal_driver,
         final_sender=final_sender,
-        attention_notifier=lambda *args: pytest.fail(
+        attention_notifier=lambda *a, **kw: pytest.fail(
             "terminal pipeline must not send an attention ask"
         ),
         close_surface_fn=close,

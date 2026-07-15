@@ -12,7 +12,7 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 import agency_ctl as ctl
 import agent_spawn
@@ -724,6 +724,10 @@ def _notify_attention(
     instance: str,
     run: Mapping[str, Any],
     synthesis: Mapping[str, Any],
+    *,
+    question: str = "",
+    options: Sequence[str] | None = None,
+    context: Mapping[str, Any] | None = None,
 ) -> None:
     ctl.bus_run(
         root,
@@ -741,7 +745,10 @@ def _notify_attention(
             "--payload-json",
             json.dumps(
                 {
-                    "message": "Pipeline requires operator attention; inspect state and resume explicitly.",
+                    "message": question or "Pipeline requires operator attention; inspect state and resume explicitly.",
+                    "question": question,
+                    "options": list(options or []),
+                    "context": dict(context or {}),
                     "synthesis": dict(synthesis),
                 }
             ),
@@ -960,7 +967,23 @@ def _serve_pipeline_runner_locked(
         current["activePipelineId"] = pipeline_id
         current["updatedAt"] = ctl.utc_now()
         ledger.save_sessions(agency, sessions)
-        attention_notifier(agency, instance, durable_run, synthesis)
+        asking = next(
+            (stage for stage in durable_run["stages"] if stage["id"] == durable_run["currentStageId"]),
+            None,
+        )
+        attention_notifier(
+            agency,
+            instance,
+            durable_run,
+            synthesis,
+            question=(asking or {}).get("error") or "",
+            options=[],  # stage report options are not durable yet; ask_user is freeform
+            context={
+                "stageId": (asking or {}).get("id"),
+                "summary": (asking or {}).get("summary") or "",
+                "artifacts": dict((asking or {}).get("artifacts") or {}),
+            },
+        )
     else:
         raise PipelineRuntimeError(f"pipeline driver returned unsupported status {status!r}")
     return synthesis

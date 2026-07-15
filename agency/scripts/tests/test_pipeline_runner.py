@@ -381,6 +381,8 @@ def test_failed_report_allows_valid_declared_subset(tmp_path: Path):
         "summary": "partial",
         "artifacts": {"notes": "partial.md"},
         "error": "boom",
+        "question": None,
+        "options": None,
     }
 
 

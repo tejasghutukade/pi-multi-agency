@@ -208,12 +208,12 @@ def validate_stage_report(
     if not isinstance(payload, Mapping):
         raise InvalidStageReport("report payload must be a mapping")
     keys = _mapping_keys(payload, "report payload")
-    allowed = {"status", "summary", "artifacts", "error"}
+    allowed = {"status", "summary", "artifacts", "error", "question", "options"}
     if not {"status", "summary", "artifacts"}.issubset(keys) or not set(keys).issubset(allowed):
         raise InvalidStageReport("report payload has missing or unsupported fields")
     status = payload.get("status")
-    if status not in {"succeeded", "failed"}:
-        raise InvalidStageReport("report status must be succeeded or failed")
+    if status not in {"succeeded", "failed", "needs_attention"}:
+        raise InvalidStageReport("report status must be succeeded, failed, or needs_attention")
     summary = payload.get("summary")
     if not isinstance(summary, str) or not summary.strip():
         raise InvalidStageReport("report summary must be a non-blank string")
@@ -224,19 +224,39 @@ def validate_stage_report(
     if any(not isinstance(key, str) or not _IDENTIFIER.fullmatch(key) for key in artifact_keys):
         raise InvalidStageReport("report contains an invalid artifact name")
     declared = list(declared_outputs)
-    if not set(artifact_keys).issubset(declared):
+    if any(key not in declared for key in artifact_keys):
         raise InvalidStageReport("report contains an undeclared artifact")
     if status == "succeeded" and (len(artifact_keys) != len(declared) or set(artifact_keys) != set(declared)):
         raise InvalidStageReport("successful report must contain every declared artifact exactly")
     error = payload.get("error")
-    if status == "failed" and (not isinstance(error, str) or not error.strip()):
-        raise InvalidStageReport("failed report requires a non-blank error")
+    question = payload.get("question")
+    options = payload.get("options")
+    if status == "needs_attention":
+        # The human-facing question is mandatory; it is stored as the stage error
+        # (the machine-facing reason) so existing attention handling applies.
+        if not isinstance(question, str) or not question.strip():
+            raise InvalidStageReport("needs_attention report requires a non-blank question")
+        if options is not None:
+            if not isinstance(options, list) or not all(isinstance(o, str) and o.strip() for o in options):
+                raise InvalidStageReport("needs_attention options must be a list of non-blank strings")
+        # error is optional here; fall back to the question for storage.
+        error = error or question
+    elif status == "failed":
+        if not isinstance(error, str) or not error.strip():
+            raise InvalidStageReport("failed report requires a non-blank error")
     if status == "succeeded" and error is not None:
         raise InvalidStageReport("successful report must not contain an error")
     normalized: dict[str, str] = {}
     for name, path in artifacts.items():
         normalized[name] = validate_artifact_path(project_root, path)
-    return {"status": status, "summary": summary, "artifacts": normalized, "error": error}
+    return {
+        "status": status,
+        "summary": summary,
+        "artifacts": normalized,
+        "error": error,
+        "question": question if status == "needs_attention" else None,
+        "options": options if status == "needs_attention" else None,
+    }
 
 
 def load_committed_execution(
@@ -328,6 +348,10 @@ def _persist_result(
         "artifacts": result["artifacts"],
         "error": result["error"],
     }
+    if result["status"] == "needs_attention":
+        # A needs_attention report carries the human-facing question in `error`
+        # (see validate_stage_report). No operator response exists yet.
+        kwargs["operator_response"] = None
     if reconciled:
         pipeline_state.record_reconciled_result(
             agency_root,
@@ -640,6 +664,11 @@ def _run_pipeline_locked(
             _attention(agency_root, run, current, lock_owner, f"Invalid stage report: {exc}")
             break
         if result["status"] == "failed" and run["onFailure"] == "stop":
+            break
+        if result["status"] == "needs_attention":
+            # Human-in-the-loop: stop the run; the runtime notifies the hub and
+            # the operator answers, then resumes (which re-dispatches this stage
+            # with the answer injected). The stage is NOT advanced.
             break
 
     return synthesize_run(pipeline_state.get_run(agency_root, pipeline_id))

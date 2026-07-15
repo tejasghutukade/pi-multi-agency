@@ -103,6 +103,8 @@ def valid_payload(path: str = "result.md") -> dict:
         "status": "succeeded",
         "summary": "completed",
         "artifacts": {"primary": path},
+        "question": None,
+        "options": None,
     }
 
 
