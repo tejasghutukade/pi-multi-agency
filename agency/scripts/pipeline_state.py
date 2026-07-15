@@ -1224,15 +1224,21 @@ def record_operator_response(
     stage_id: str,
     response: str,
     *,
-    lock_owner: str,
+    lock_owner: str | None = None,
 ) -> dict[str, Any]:
     """Persist a human answer for a needs_attention stage; no status transition.
 
     The answer is bound to the exact stage that asked. Resume later consumes it by
     re-dispatching the same stage with the answer injected (Design B: stateless
     continuation). The stage status stays needs_attention until resume re-dispatches.
+
+    This is an operator action, gated at the CLI by orchestrator authority
+    (see agency_ctl `pipeline-answer`); it intentionally does not require the
+    pipeline lock owner, because the runner is paused (not executing) at
+    needs_attention. The run must be active and the stage must be needs_attention.
     """
-    _assert_lock(root, pipeline_id, lock_owner)
+    if lock_owner is not None:
+        _assert_lock(root, pipeline_id, lock_owner)
     data = load_state(root)
     run = _run_from_data(data, pipeline_id)
     if data["activePipelineId"] != pipeline_id:

@@ -897,6 +897,45 @@ def cmd_pipeline_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pipeline_answer(args: argparse.Namespace) -> int:
+    """Operator entry: record a human answer for a needs_attention stage.
+
+    Orchestrator-gated (HUB surface). Persists the answer bound to the exact
+    stage, then optionally resumes the paused runner, which re-dispatches the
+    stage with the answer injected (Design B continuation).
+    """
+    from pipeline_runtime import serve_pipeline_runner
+
+    root = agency_root()
+    require_operation_authority(root)  # orchestrator only
+    if not args.pipeline_id or not args.stage:
+        raise RuntimeError("pipeline-answer requires --pipeline-id and --stage")
+    answer = args.answer or ""
+    stage = pipeline_state.record_operator_response(
+        root,
+        args.pipeline_id,
+        args.stage,
+        answer,
+        lock_owner=None,
+    )
+    out: dict[str, Any] = {
+        "ok": True,
+        "action": "pipeline-answer",
+        "pipelineId": args.pipeline_id,
+        "stageId": args.stage,
+        "operatorResponse": stage["operatorResponse"],
+    }
+    if args.resume:
+        # Resume drives the runner, which re-dispatches the answered stage.
+        active = pipeline_state.get_active_run(root)
+        if active is None or not active.get("runnerInstance"):
+            raise RuntimeError("no bound runner instance to resume")
+        result = serve_pipeline_runner(active["runnerInstance"], resume=True)
+        out["result"] = result
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="agency_ctl", description="Multi-Agency Option C control plane")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -990,6 +1029,15 @@ def main() -> int:
     report.add_argument("--payload-json", required=True)
     report.add_argument("--prepare-only", action="store_true")
 
+    ans = sub.add_parser(
+        "pipeline-answer",
+        help="Record a human answer for a needs_attention stage (orchestrator)",
+    )
+    ans.add_argument("--pipeline-id", required=True)
+    ans.add_argument("--stage", required=True)
+    ans.add_argument("--answer", default="")
+    ans.add_argument("--resume", action="store_true", help="Resume the runner after recording the answer")
+
     ini = sub.add_parser("init", help="Scaffold .pi/agency + .pi/agents in a project from this package")
     ini.add_argument("--project", help="Project root (default: cwd)")
     ini.add_argument("--force", action="store_true", help="Refresh templates even if already initialized")
@@ -1041,6 +1089,8 @@ def main() -> int:
             return cmd_pipeline_runner_serve(args)
         if args.cmd == "pipeline-report":
             return cmd_pipeline_report(args)
+        if args.cmd == "pipeline-answer":
+            return cmd_pipeline_answer(args)
         if args.cmd == "lifecycle":
             fwd = list(args.lifecycle_args or [])
             if fwd and fwd[0] == "--":
