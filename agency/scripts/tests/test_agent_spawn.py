@@ -19,8 +19,15 @@ class FakeCtl:
         self.authority_calls = []
         self.stage_spawn_calls = []
 
+    def require_orchestrator(self, root, *, recovery=False):
+        return {"intercomName": "orchestrator"}
+
     def require_operation_authority(self, root, *, pipeline_id=None, recovery=False):
         self.authority_calls.append({"pipeline_id": pipeline_id, "recovery": recovery})
+        # Mirror real agency_ctl.require_operation_authority: when no pipeline is
+        # bound, the authority decision is the orchestrator gate.
+        if pipeline_id is None:
+            return self.require_orchestrator(root, recovery=recovery)
         return {"intercomName": "orchestrator"}
 
     def require_active_dispatched_stage_spawn(self, root, pipeline_id, role, instance):
