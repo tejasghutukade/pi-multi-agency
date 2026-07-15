@@ -118,6 +118,68 @@ def test_recv_claim_done(agency_tmp: Path):
     assert done.parent.name == "done"
 
 
+def _send_report(root: Path, sender: str, task_id: str) -> None:
+    rc = bus.cmd_send(
+        Namespace(
+            type="report",
+            from_name=sender,
+            to="orchestrator",
+            task_id=task_id,
+            workflow_id=None,
+            correlation_id=None,
+            reply_to=None,
+            ttl=3600,
+            priority="normal",
+            payload_json="{}",
+            payload_file=None,
+            payload_path=None,
+            notify_title=None,
+            notify_body=None,
+            no_notify=True,
+            allow_peers=False,
+        )
+    )
+    assert rc == 0
+
+
+def test_wait_sender_filter_leaves_wrong_sender_pending(agency_tmp: Path, capsys):
+    _send_report(agency_tmp, "scout-t02", "pipeline-task")
+    _send_report(agency_tmp, "scout-t01", "pipeline-task")
+    capsys.readouterr()
+
+    assert bus.cmd_wait(
+        Namespace(
+            as_name="orchestrator",
+            task_id="pipeline-task",
+            from_name="scout-t01",
+            timeout=0,
+            interval=0,
+            auto_done_progress=True,
+        )
+    ) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["envelope"]["from"] == "scout-t01"
+    pending = [json.loads(path.read_text()) for path in bus.list_pending(agency_tmp, "orchestrator")]
+    assert [envelope["from"] for envelope in pending] == ["scout-t02"]
+
+
+def test_wait_without_sender_filter_remains_backward_compatible(agency_tmp: Path, capsys):
+    _send_report(agency_tmp, "scout-t02", "ordinary-task")
+    capsys.readouterr()
+    assert bus.cmd_wait(
+        Namespace(
+            as_name="orchestrator",
+            task_id="ordinary-task",
+            timeout=0,
+            interval=0,
+            auto_done_progress=True,
+        )
+    ) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "message"
+    assert output["envelope"]["from"] == "scout-t02"
+
+
 def test_notify_noop_when_disabled(agency_tmp: Path):
     notes: list[str] = []
     bus.set_notify(lambda t, b: notes.append(t) or True)

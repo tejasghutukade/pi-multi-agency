@@ -286,6 +286,9 @@ def cmd_wait(args: argparse.Namespace) -> int:
                 continue
             if peek.get("taskId") != args.task_id:
                 continue
+            expected_sender = getattr(args, "from_name", None)
+            if expected_sender is not None and peek.get("from") != expected_sender:
+                continue
             matched.append((src, peek))
 
         if args.auto_done_progress:
@@ -416,6 +419,7 @@ def main() -> int:
     w = sub.add_parser("wait", help="Wait for pending envelope matching taskId")
     w.add_argument("--as", dest="as_name", required=True)
     w.add_argument("--task-id", required=True)
+    w.add_argument("--from", dest="from_name", help="Match only envelopes from this sender")
     w.add_argument("--timeout", type=float, default=120.0)
     w.add_argument("--interval", type=float, default=2.0)
     w.add_argument(

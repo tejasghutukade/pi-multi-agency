@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +14,16 @@ import pytest
 class FakeCtl:
     def __init__(self, root: Path):
         self.root = root
+        self.authority_calls = []
+        self.stage_role_calls = []
 
-    def require_orchestrator(self, root, *, recovery=False):
+    def require_operation_authority(self, root, *, pipeline_id=None, recovery=False):
+        self.authority_calls.append({"pipeline_id": pipeline_id, "recovery": recovery})
         return {"intercomName": "orchestrator"}
+
+    def require_active_pending_stage_role(self, root, pipeline_id, role):
+        self.stage_role_calls.append({"pipeline_id": pipeline_id, "role": role})
+        return {"id": "stage", "role": role, "status": "pending"}
 
     def reconcile_cmux(self, root):
         return {"ok": True}
@@ -36,6 +45,9 @@ def spawn_env(tmp_path: Path, monkeypatch):
     lifecycleDefault: temporary
     peers: [orchestrator]
   planner:
+    lifecycleDefault: persistent
+    peers: [orchestrator]
+  worker:
     lifecycleDefault: persistent
     peers: [orchestrator]
 spawn:
@@ -72,6 +84,28 @@ def test_max_panes(spawn_env: Path):
     (spawn_env / "sessions.json").write_text(json.dumps(data) + "\n")
     with pytest.raises(RuntimeError, match="max specialist panes"):
         asp.spawn_specialist("scout", dry_run=True)
+    with pytest.raises(RuntimeError, match="max specialist panes"):
+        asp.spawn_specialist("scout", dry_run=True, pipeline_id="p-123")
+
+
+def test_pipeline_authority_still_enforces_worker_sole_writer(spawn_env: Path):
+    data = {
+        "version": 1,
+        "instances": [
+            {"intercomName": "worker", "role": "worker", "status": "idle"},
+        ],
+    }
+    (spawn_env / "sessions.json").write_text(json.dumps(data) + "\n")
+    with pytest.raises(RuntimeError, match="sole writer"):
+        asp.spawn_specialist("worker", dry_run=True, pipeline_id="p-123")
+
+
+def test_spawn_threads_pipeline_authority_before_policy(spawn_env: Path, monkeypatch):
+    fake = FakeCtl(spawn_env)
+    monkeypatch.setattr(asp, "_ctl", lambda: fake)
+    asp.spawn_specialist("scout", dry_run=True, pipeline_id="p-123")
+    assert fake.authority_calls == [{"pipeline_id": "p-123", "recovery": False}]
+    assert fake.stage_role_calls == [{"pipeline_id": "p-123", "role": "scout"}]
 
 
 def test_dry_run_creates_idle_row(spawn_env: Path):
@@ -180,6 +214,18 @@ def test_managed_guidance_uses_broker_status_not_prompt_time_exports():
     for path in guidance[2:]:
         on_each = path.read_text().split("## On each delegation", 1)[-1]
         assert '`export AGENCY_ROOT="<project>/.pi/agency"`' not in on_each, path
+
+
+def test_agent_spawn_cli_exposes_pipeline_id_for_spawn():
+    result = subprocess.run(
+        [sys.executable, str(Path(asp.__file__)), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "--pipeline-id" in result.stdout
+    assert "--pipeline " not in result.stdout
 
 
 def test_dual_entry_same_function():

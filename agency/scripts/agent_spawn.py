@@ -96,6 +96,7 @@ def spawn_specialist(
     cwd: str | None = None,
     nudge: bool = False,
     recovery: bool = False,
+    pipeline_id: str | None = None,
     message: str | None = None,
 ) -> dict[str, Any]:
     """Open (or reuse) a specialist pane and boot pi. Must run inside cmux.
@@ -104,7 +105,9 @@ def spawn_specialist(
     """
     ctl = _ctl()
     root = agency_root()
-    ctl.require_orchestrator(root, recovery=recovery)
+    ctl.require_operation_authority(root, pipeline_id=pipeline_id, recovery=recovery)
+    if pipeline_id is not None:
+        ctl.require_active_pending_stage_role(root, pipeline_id, role)
     try:
         ctl.reconcile_cmux(root)
     except Exception:
@@ -288,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--boot-wait", type=float, default=5.0)
     p.add_argument("--cwd", help="Pane working directory (Scout reference-repo mode)")
+    p.add_argument("--pipeline-id", help="Select bound pipeline-runner authority")
     p.add_argument(
         "--message",
         "-m",
@@ -312,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
             cwd=args.cwd,
             nudge=False,
             recovery=args.recovery,
+            pipeline_id=args.pipeline_id,
             message=args.message,
         )
         print(json.dumps(result, indent=2))
