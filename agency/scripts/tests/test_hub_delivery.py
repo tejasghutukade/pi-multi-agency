@@ -1,9 +1,92 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import hub_delivery as hd
+import pipeline_state
+
+
+def _active_run(root: Path) -> None:
+    pipeline_state.acquire_lock(
+        root,
+        pipeline_id="pipe-X",
+        owner_id="runner",
+        owner_pid=os.getpid(),
+        owner_surface="surface:runner",
+    )
+    pipeline_state.create_run(
+        root,
+        pipeline_id="pipe-X",
+        pipeline_name="flow",
+        topic="t",
+        definition={
+            "description": "d",
+            "onFailure": "stop",
+            "stages": [
+                {"id": "work", "role": "worker", "goal": "g", "outputs": ["primary"], "inputs": []}
+            ],
+        },
+        lock_owner="runner",
+        runner_instance="runner-t1",
+        runner_surface="surface:runner",
+    )
+    pipeline_state.record_dispatched(
+        root, "pipe-X", "work", lock_owner="runner", assigned_instance="worker-t1"
+    )
+
+
+def test_owned_stage_report_filtered_from_claim(tmp_path: Path):
+    _active_run(tmp_path)
+    pending = tmp_path / "inbox" / "orchestrator" / "pending"
+    pending.mkdir(parents=True)
+    (pending / "owned.json").write_text(
+        json.dumps({"type": "report", "from": "worker-t1", "taskId": "pl-pipe-X-s1", "payload": {"status": "succeeded"}}) + "\n"
+    )
+    (pending / "normal.json").write_text(
+        json.dumps({"type": "report", "from": "scout-t01", "taskId": "t2", "payload": {"summary": "x"}}) + "\n"
+    )
+    claimed = hd.claim_for_delivery(tmp_path)
+    assert claimed["empty"] is False
+    assert claimed["envelope"]["taskId"] == "t2"
+
+
+def test_owned_stage_report_excluded_from_pending_hub(tmp_path: Path):
+    import lifecycle_bridge as lb
+
+    _active_run(tmp_path)
+    pending = tmp_path / "inbox" / "orchestrator" / "pending"
+    pending.mkdir(parents=True)
+    (pending / "owned.json").write_text(
+        json.dumps({"type": "report", "from": "worker-t1", "taskId": "pl-pipe-X-s1"}) + "\n"
+    )
+    (pending / "ask.json").write_text(
+        json.dumps({"type": "ask", "from": "worker-t1", "taskId": "pl-pipe-X-s1", "payload": {"q": 1}}) + "\n"
+    )
+    (pending / "normal.json").write_text(
+        json.dumps({"type": "report", "from": "scout-t01", "taskId": "t2"}) + "\n"
+    )
+    items = lb.hub_inbox_envelopes(tmp_path)
+    tuples = {(i["envelope"]["type"], i["envelope"].get("taskId")) for i in items}
+    assert ("report", "pl-pipe-X-s1") not in tuples
+    assert ("ask", "pl-pipe-X-s1") in tuples
+    assert ("report", "t2") in tuples
+
+
+def test_unrelated_and_final_reports_remain_visible(tmp_path: Path):
+    _active_run(tmp_path)
+    pending = tmp_path / "inbox" / "orchestrator" / "pending"
+    pending.mkdir(parents=True)
+    (pending / "stray.json").write_text(
+        json.dumps({"type": "report", "from": "x", "taskId": "pl-other-s1"}) + "\n"
+    )
+    (pending / "final.json").write_text(
+        json.dumps({"type": "report", "from": "runner-t1", "taskId": "pipe-done-pipe-X"}) + "\n"
+    )
+    claimed = hd.claim_for_delivery(tmp_path)
+    assert claimed["empty"] is False
+    assert claimed["envelope"]["taskId"] in ("pl-other-s1", "pipe-done-pipe-X")
 
 
 def test_format_delivery_text_json_payload():

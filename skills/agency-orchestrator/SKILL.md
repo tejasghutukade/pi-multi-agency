@@ -156,6 +156,8 @@ Broker delivery is the task communication path.
 
 **Hub only** — specialists only message `orchestrator` through broker tools. Synthesize for the user with artifact paths.
 
+**Declarative pipelines (hands-off run):** when a `pipeline-runner` drives a named pipeline, intermediate stage `report`s are consumed by the bound runner and filtered from this chat — do **not** re-spawn or re-delegate those stage `taskId`s. Only the runner's final synthesis `report` and any pipeline `ask` arrive here. The runner advances stages deterministically; your job is to present the final synthesis and act on asks.
+
 ## Release / teardown
 
 ```text

@@ -16,6 +16,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 from agency_paths import agency_root  # noqa: E402
 from ledger import find_instance, load_sessions, save_sessions  # noqa: E402
+from pipeline_state import find_task_ownership  # noqa: E402
 
 HUB = "orchestrator"
 
@@ -47,6 +48,26 @@ def format_delivery_text(env: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def is_state_owned_stage_report(root: Path, env: Any) -> bool:
+    """True only for an exact active pipeline stage report.
+
+    Ownership comes from durable pipeline state, never the ``pl-`` prefix.
+    Asks and non-pipeline reports are never owned here; the bound runner
+    consumes owned stage reports, so the orchestrator must not double-act.
+    """
+    if not isinstance(env, dict):
+        return False
+    if env.get("type") != "report":
+        return False
+    task_id = env.get("taskId")
+    if not isinstance(task_id, str) or not task_id:
+        return False
+    ownership = find_task_ownership(root, task_id, active_only=True)
+    if ownership is None:
+        return False
+    return ownership.get("taskKind") == "stage"
+
+
 def claim_for_delivery(root: Path, *, task_id: str | None = None) -> dict[str, Any]:
     """Claim oldest pending hub report/ask → processing. Returns result dict (not printed)."""
     ensure = root / "inbox" / HUB / "pending"
@@ -61,6 +82,8 @@ def claim_for_delivery(root: Path, *, task_id: str | None = None) -> dict[str, A
         except (OSError, json.JSONDecodeError):
             continue
         if peek.get("type") not in ("report", "ask"):
+            continue
+        if is_state_owned_stage_report(root, peek):
             continue
         if task_id and peek.get("taskId") != task_id:
             continue
