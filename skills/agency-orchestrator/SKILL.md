@@ -158,6 +158,8 @@ Broker delivery is the task communication path.
 
 **Declarative pipelines (hands-off run):** when a `pipeline-runner` drives a named pipeline, intermediate stage `report`s are consumed by the bound runner and filtered from this chat — do **not** re-spawn or re-delegate those stage `taskId`s. Only the runner's final synthesis `report` and any pipeline `ask` arrive here. The runner advances stages deterministically; your job is to present the final synthesis and act on asks.
 
+To start one: `agency_spawn({ role: "pipeline-runner", pipeline: "<name>", topic: "<text>" })` (requires your orchestrator surface), then `agency_delegate({ to: <runner>, taskId: <finalTaskId>, payloadJson: JSON.stringify({ pipelineId, pipelineName, topic }) })`. The runner claims the delegate and drives the run; you stay free until the final synthesis lands.
+
 ## Release / teardown
 
 ```text

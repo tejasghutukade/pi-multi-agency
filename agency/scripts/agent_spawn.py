@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -24,6 +24,7 @@ from catalog import (  # noqa: E402
     HUB,
     agent_file_for,
     load_agents,
+    load_pipelines,
     max_specialist_panes,
     parse_agent_frontmatter,
     role_defaults,
@@ -37,6 +38,7 @@ from ledger import (  # noqa: E402
     save_sessions,
     specialist_count,
 )
+from pipeline_state import acquire_lock, create_run, load_state  # noqa: E402
 from pi_launch import build_pi_command, write_boot_prompt  # noqa: E402
 
 
@@ -44,6 +46,22 @@ def _ctl():
     import agency_ctl as ctl
 
     return ctl
+
+
+def _allocate_pipeline_id(root: Path, pipeline_name: str) -> str:
+    """Allocate a unique, safe pipeline id for an init request."""
+    try:
+        data = load_state(root)
+    except Exception:
+        data = {"runs": []}
+    for _ in range(16):
+        candidate = f"{pipeline_name}-{secrets.token_hex(4)}"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", candidate):
+            continue
+        if any(run.get("pipelineId") == candidate for run in data.get("runs", [])):
+            continue
+        return candidate
+    raise RuntimeError("could not allocate a unique pipeline id")
 
 
 def utc_now() -> str:
@@ -127,6 +145,9 @@ def spawn_specialist(
     recovery: bool = False,
     pipeline_id: str | None = None,
     message: str | None = None,
+    pipeline_name: str | None = None,
+    topic: str | None = None,
+    pipeline_init: bool = False,
 ) -> dict[str, Any]:
     """Open (or reuse) a specialist pane and boot pi. Must run inside cmux.
 
@@ -134,7 +155,8 @@ def spawn_specialist(
     """
     ctl = _ctl()
     root = agency_root()
-    ctl.require_operation_authority(root, pipeline_id=pipeline_id, recovery=recovery)
+    if not pipeline_init:
+        ctl.require_operation_authority(root, pipeline_id=pipeline_id, recovery=recovery)
     if pipeline_id is not None:
         if not name:
             raise RuntimeError("pipeline spawn denied: explicit --name is required")
@@ -296,6 +318,36 @@ def spawn_specialist(
     row["updatedAt"] = utc_now()
     save_sessions(root, data)
 
+    pipeline_id_out = pipeline_id
+    final_task_id: str | None = None
+    if role == "pipeline-runner" and (pipeline_name or topic):
+        if pipeline_id is not None:
+            raise RuntimeError("pipeline init cannot also carry --pipeline-id")
+        if not pipeline_name or not topic:
+            raise RuntimeError("pipeline init requires --pipeline <name> and --topic <text>")
+        loaded = load_pipelines(root)
+        definition = (loaded.get("pipelines") or {}).get(pipeline_name)
+        if not isinstance(definition, Mapping):
+            raise RuntimeError(f"pipeline {pipeline_name!r} is not defined in pipelines.yaml")
+        pipeline_id_out = _allocate_pipeline_id(root, pipeline_name)
+        acquire_lock(
+            root,
+            pipeline_id=pipeline_id_out,
+            owner_id=instance_name,
+            owner_surface=surface,
+        )
+        create_run(
+            root,
+            pipeline_id=pipeline_id_out,
+            pipeline_name=pipeline_name,
+            topic=topic,
+            definition=definition,
+            lock_owner=instance_name,
+            runner_instance=instance_name,
+            runner_surface=surface,
+        )
+        final_task_id = f"pipe-done-{pipeline_id_out}"
+
     work = str(spawn_cwd)
     if fixed_runner:
         process_cmd = build_pipeline_runner_command(
@@ -314,13 +366,17 @@ def spawn_specialist(
         row["status"] = "idle"
         row["updatedAt"] = utc_now()
         save_sessions(root, data)
-        return {
+        result = {
             "ok": True,
             "action": "spawn",
             "instance": row,
             "bootWaitSec": boot_wait,
             "processCommand": process_cmd,
         }
+        if final_task_id is not None:
+            result["pipelineId"] = pipeline_id_out
+            result["finalTaskId"] = final_task_id
+        return result
 
     boot = (
         message

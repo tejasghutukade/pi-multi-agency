@@ -494,8 +494,66 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         recovery=bool(getattr(args, "recovery", False)),
         pipeline_id=getattr(args, "pipeline_id", None),
         message=getattr(args, "message", None),
+        pipeline_name=getattr(args, "pipeline_name", None),
+        topic=getattr(args, "topic", None),
+        pipeline_init=False,
     )
     print(json.dumps(result, indent=2))
+    return 0
+
+def cmd_run_pipeline(args: argparse.Namespace) -> int:
+    """User entry: create one run, launch the runner, send the initial delegate.
+
+    This is a documented root-operator command (like agency_init); it does not
+    expose a caller-supplied authority bypass flag.  The initial delegate uses
+    --require-caller and must run from the orchestrator hub surface.
+    """
+    from agent_spawn import spawn_specialist
+
+    result = spawn_specialist(
+        "pipeline-runner",
+        name=None,
+        pipeline_name=args.name,
+        topic=args.topic,
+        pipeline_init=True,
+    )
+    instance = result["instance"]["intercomName"]
+    pipeline_id = result["pipelineId"]
+    final_task_id = result["finalTaskId"]
+    bus_run(
+        agency_root(),
+        [
+            "send",
+            "--from",
+            HUB,
+            "--to",
+            instance,
+            "--type",
+            "delegate",
+            "--task-id",
+            final_task_id,
+            "--payload-json",
+            json.dumps(
+                {
+                    "pipelineId": pipeline_id,
+                    "pipelineName": args.name,
+                    "topic": args.topic,
+                }
+            ),
+            "--require-caller",
+        ],
+    )
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "pipelineId": pipeline_id,
+                "instance": instance,
+                "finalTaskId": final_task_id,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -855,6 +913,8 @@ def main() -> int:
     sp.add_argument("--boot-wait", type=float, default=5.0)
     sp.add_argument("--cwd", help="Pane working directory (Scout reference-repo mode)")
     sp.add_argument("--pipeline-id", help="Select bound pipeline-runner authority")
+    sp.add_argument("--pipeline-name", help="Pipeline name from pipelines.yaml (pipeline-runner init)")
+    sp.add_argument("--topic", help="Pipeline topic (pipeline-runner init)")
     sp.add_argument(
         "--message",
         "-m",
@@ -866,6 +926,10 @@ def main() -> int:
         action="store_true",
         help="Skip orchestrator surface gate (lifecycle abandon/respawn)",
     )
+
+    rp = sub.add_parser("run-pipeline", help="Start a named declarative pipeline (root-operator entry)")
+    rp.add_argument("--name", required=True, help="Pipeline name from pipelines.yaml")
+    rp.add_argument("--topic", required=True, help="Pipeline topic")
 
     d = sub.add_parser("delegate", help="Send bus delegate envelope")
     d.add_argument("--to", required=True)
@@ -961,6 +1025,8 @@ def main() -> int:
             return cmd_list(args)
         if args.cmd == "spawn":
             return cmd_spawn(args)
+        if args.cmd == "run-pipeline":
+            return cmd_run_pipeline(args)
         if args.cmd == "delegate":
             return cmd_delegate(args)
         if args.cmd == "wait":

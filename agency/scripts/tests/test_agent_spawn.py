@@ -428,3 +428,43 @@ def test_dual_entry_same_function():
     import specialist_spawn as ss
 
     assert ss.spawn_specialist is asp.spawn_specialist
+
+
+def test_spawn_pipeline_init_creates_run_and_lock(spawn_env, monkeypatch):
+    root = spawn_env
+    (root / "pipelines.yaml").write_text(
+        "pipelines:\n"
+        "  smoke:\n"
+        "    description: smoke\n"
+        "    onFailure: stop\n"
+        "    stages:\n"
+        "      - id: w\n"
+        "        role: worker\n"
+        "        goal: work\n"
+        "        outputs: [primary]\n"
+        "        inputs: []\n"
+    )
+    monkeypatch.setattr(asp, "_ctl", lambda: FakeCtl(root))
+    monkeypatch.setattr(
+        asp, "open_pane", lambda direction, focus=False: {"surface": "surface:runner", "pane": "pane:runner"}
+    )
+    sent = []
+    monkeypatch.setattr(
+        asp, "send_to_surface", lambda surface, command: sent.append((surface, command))
+    )
+
+    result = asp.spawn_specialist("pipeline-runner", pipeline_name="smoke", topic="my topic")
+
+    assert result["action"] == "spawn"
+    assert result["pipelineId"]
+    assert result["finalTaskId"] == f"pipe-done-{result['pipelineId']}"
+    from pipeline_state import get_active_run, read_lock
+
+    run = get_active_run(root)
+    assert run["pipelineName"] == "smoke"
+    assert run["topic"] == "my topic"
+    assert run["status"] == "running"
+    lock = read_lock(root)
+    assert lock["pipelineId"] == result["pipelineId"]
+    assert lock["ownerId"] == result["instance"]["intercomName"]
+    assert sent and sent[0][0] == "surface:runner"

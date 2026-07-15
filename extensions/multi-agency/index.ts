@@ -613,6 +613,8 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			dryRun: Type.Optional(Type.Boolean()),
 			bootWaitSec: Type.Optional(Type.Number()),
 			cwd: Type.Optional(Type.String({ description: "Pane cwd (Scout reference-repo)" })),
+			pipeline: Type.Optional(Type.String({ description: "Pipeline name from pipelines.yaml (pipeline-runner init)" })),
+			topic: Type.Optional(Type.String({ description: "Pipeline topic (pipeline-runner init)" })),
 		}),
 		async execute(_id, params, signal) {
 			const args = ["spawn", "--role", params.role];
@@ -623,6 +625,8 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			if (params.dryRun) args.push("--dry-run");
 			if (params.bootWaitSec != null) args.push("--boot-wait", String(params.bootWaitSec));
 			if (params.cwd) args.push("--cwd", params.cwd);
+			if (params.pipeline) args.push("--pipeline-name", params.pipeline);
+			if (params.topic) args.push("--topic", params.topic);
 			const r = await ctl(args, signal);
 			if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_spawn failed");
 			const payload = JSON.parse(r.stdout) as AgencySpawnPayload;
