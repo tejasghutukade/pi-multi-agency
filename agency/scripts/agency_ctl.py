@@ -811,6 +811,34 @@ def cmd_pipeline_runner_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pipeline_report(args: argparse.Namespace) -> int:
+    # Ordinary reports must be able to probe this route without gaining pipeline
+    # authority or mutating either transport.
+    from pipeline_runtime import prepare_pipeline_report, send_pipeline_report
+
+    payload = json.loads(args.payload_json)
+    root = agency_root()
+    project = project_root()
+    if args.prepare_only:
+        result = prepare_pipeline_report(
+            root,
+            project,
+            from_instance=args.from_instance,
+            task_id=args.task_id,
+            payload=payload,
+        )
+    else:
+        result = send_pipeline_report(
+            root,
+            project,
+            from_instance=args.from_instance,
+            task_id=args.task_id,
+            payload=payload,
+        )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="agency_ctl", description="Multi-Agency Option C control plane")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -889,6 +917,15 @@ def main() -> int:
     prs.add_argument("--resume", action="store_true")
     prs.add_argument("--wait-timeout", type=float, default=120.0)
 
+    report = sub.add_parser(
+        "pipeline-report",
+        help="Validate and route an authenticated declarative pipeline stage report",
+    )
+    report.add_argument("--from", dest="from_instance", required=True)
+    report.add_argument("--task-id", required=True)
+    report.add_argument("--payload-json", required=True)
+    report.add_argument("--prepare-only", action="store_true")
+
     ini = sub.add_parser("init", help="Scaffold .pi/agency + .pi/agents in a project from this package")
     ini.add_argument("--project", help="Project root (default: cwd)")
     ini.add_argument("--force", action="store_true", help="Refresh templates even if already initialized")
@@ -936,6 +973,8 @@ def main() -> int:
             if args.pipeline_runner_cmd != "serve":
                 raise RuntimeError(f"unknown pipeline-runner command {args.pipeline_runner_cmd}")
             return cmd_pipeline_runner_serve(args)
+        if args.cmd == "pipeline-report":
+            return cmd_pipeline_report(args)
         if args.cmd == "lifecycle":
             fwd = list(args.lifecycle_args or [])
             if fwd and fwd[0] == "--":

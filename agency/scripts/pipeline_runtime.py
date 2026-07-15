@@ -79,6 +79,127 @@ def _quarantine(root: Path, inbox_name: str, path: Path) -> Path:
     return rejected
 
 
+def prepare_pipeline_report(
+    root: Path,
+    project: Path,
+    *,
+    from_instance: str,
+    task_id: str,
+    payload: Any,
+) -> dict[str, Any]:
+    """Validate an active stage report and its live, exact sender binding."""
+    ownership = pipeline_state.find_task_ownership(root, task_id, active_only=True)
+    if ownership is None:
+        return {"pipelineOwned": False}
+    if ownership.get("taskKind") != "stage":
+        raise PipelineRuntimeError("final pipeline task IDs cannot use pipeline-report")
+    if ownership.get("stageStatus") not in {"dispatched", "needs_attention"}:
+        raise PipelineRuntimeError("pipeline report task is not dispatched or awaiting attention")
+    expected_sender = ownership.get("expectedSender")
+    if not isinstance(expected_sender, str) or not expected_sender:
+        raise PipelineRuntimeError("pipeline report task has no expected sender")
+    if from_instance != expected_sender:
+        raise PipelineRuntimeError(
+            f"pipeline report sender mismatch: expected {expected_sender!r}, got {from_instance!r}"
+        )
+
+    surface, _pane = ctl.caller_surface()
+    sessions = ledger.load_sessions(root)
+    rows = [
+        row
+        for row in (sessions.get("instances") or [])
+        if row.get("cmuxSurface") == surface
+    ]
+    if len(rows) != 1:
+        raise PipelineRuntimeError(
+            f"pipeline report caller surface {surface!r} maps to {len(rows)} rows"
+        )
+    row = rows[0]
+    if row.get("intercomName") != expected_sender:
+        raise PipelineRuntimeError("pipeline report caller surface belongs to another sender")
+    instance_id = row.get("instanceId")
+    if not isinstance(instance_id, str) or not instance_id:
+        raise PipelineRuntimeError("pipeline report sender instanceId is missing")
+    if row.get("taskId") != task_id:
+        raise PipelineRuntimeError("pipeline report sender row taskId does not match exactly")
+    if ctl.surface_alive(surface) is not True:
+        raise PipelineRuntimeError("pipeline report sender surface is not confirmed alive")
+
+    loaded = catalog.load_pipelines(root)
+    definition = (loaded.get("pipelines") or {}).get(ownership.get("pipelineName"))
+    if not isinstance(definition, Mapping):
+        raise PipelineRuntimeError("pipeline report definition is unavailable")
+    stage_definition = next(
+        (
+            stage
+            for stage in (definition.get("stages") or [])
+            if stage.get("id") == ownership.get("stageId")
+        ),
+        None,
+    )
+    if not isinstance(stage_definition, Mapping):
+        raise PipelineRuntimeError("pipeline report stage definition is unavailable")
+
+    normalized = pipeline_runner.validate_stage_report(
+        envelope={
+            "type": "report",
+            "from": from_instance,
+            "to": catalog.HUB,
+            "taskId": task_id,
+            "payload": payload,
+        },
+        expected_task_id=task_id,
+        expected_sender=expected_sender,
+        declared_outputs=stage_definition["outputs"],
+        project_root=project,
+    )
+    if normalized.get("error") is None:
+        normalized.pop("error", None)
+    return {
+        "pipelineOwned": True,
+        "payload": normalized,
+        "ownership": ownership,
+    }
+
+
+def send_pipeline_report(
+    root: Path,
+    project: Path,
+    *,
+    from_instance: str,
+    task_id: str,
+    payload: Any,
+) -> dict[str, Any]:
+    """Validate then publish one authenticated, durable stage report."""
+    prepared = prepare_pipeline_report(
+        root,
+        project,
+        from_instance=from_instance,
+        task_id=task_id,
+        payload=payload,
+    )
+    if prepared["pipelineOwned"] is False:
+        return prepared
+    result = ctl.bus_run(
+        root,
+        [
+            "send",
+            "--from",
+            from_instance,
+            "--to",
+            catalog.HUB,
+            "--type",
+            "report",
+            "--task-id",
+            task_id,
+            "--payload-json",
+            json.dumps(prepared["payload"]),
+            "--require-caller",
+        ],
+    )
+    return {**prepared, "bus": result}
+
+
 class AgencyControlPlane:
     """Effectful adapter over authenticated ctl operations and the durable bus."""
 

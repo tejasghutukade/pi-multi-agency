@@ -18,6 +18,7 @@ import { AgencyBrokerRuntime } from "./broker-runtime.ts";
 import { discoverProjectRoot, resolveBrokerContext } from "./broker/paths.ts";
 import { installLifecycleBridge } from "./lifecycle.ts";
 import { makeAgencyMessage } from "./messages.ts";
+import { buildAgencyReportPayload, isPipelineRunnerTarget } from "./pipeline-routing.ts";
 
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -670,8 +671,18 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 
 			const preflight = await ctl([...args, "--prepare-only"], signal);
 			if (preflight.code !== 0) throw new Error(preflight.stderr.trim() || preflight.stdout.trim() || "agency_delegate preflight failed");
-			const preflightPayload = JSON.parse(preflight.stdout) as { payload?: Record<string, unknown> };
+			const preflightPayload = JSON.parse(preflight.stdout) as { payload?: Record<string, unknown>; instance?: AgencyInstance };
 			const livePayload = preflightPayload.payload || {};
+
+			if (isPipelineRunnerTarget(preflightPayload)) {
+				const r = await ctl(args, signal);
+				if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim() || "agency_delegate failed");
+				const payload = JSON.parse(r.stdout) as AgencyDelegatePayload;
+				return {
+					content: [{ type: "text" as const, text: formatAgencyDelegate(payload) }],
+					details: payload,
+				};
+			}
 
 			let brokerResult: { delivered: boolean; id?: string; reason?: string } | null = null;
 			try {
@@ -714,21 +725,50 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "agency_report",
 		label: "Agency report",
-		description: "Specialist-only: report task completion to the Orchestrator over the agency broker",
+		description: "Specialist-only: report task completion to the Orchestrator (pipeline stages use authenticated durable delivery)",
 		promptSnippet: "Report completed agency work to the Orchestrator",
 		parameters: Type.Object({
 			taskId: Type.Optional(Type.String()),
+			status: Type.Optional(StringEnum(["succeeded", "failed"] as const)),
 			summary: Type.Optional(Type.String()),
 			output: Type.Optional(Type.String()),
+			artifacts: Type.Optional(Type.Record(Type.String(), Type.String())),
+			error: Type.Optional(Type.String()),
 			payloadJson: Type.Optional(Type.String()),
 		}),
-		async execute(_id, params) {
-			const payload = params.payloadJson
-				? JSON.parse(params.payloadJson) as Record<string, unknown>
-				: { summary: params.summary, output: params.output };
+		async execute(_id, params, signal) {
+			const payload = buildAgencyReportPayload(params);
+			const from = broker.sessionName || "specialist";
+			if (params.taskId) {
+				const args = [
+					"pipeline-report",
+					"--from",
+					from,
+					"--task-id",
+					params.taskId,
+					"--payload-json",
+					JSON.stringify(payload),
+				];
+				const preflight = await ctl([...args, "--prepare-only"], signal);
+				if (preflight.code !== 0) {
+					throw new Error(preflight.stderr.trim() || preflight.stdout.trim() || "agency_report pipeline preflight failed");
+				}
+				const prepared = JSON.parse(preflight.stdout) as { pipelineOwned?: boolean };
+				if (prepared.pipelineOwned === true) {
+					const sent = await ctl(args, signal);
+					if (sent.code !== 0) {
+						throw new Error(sent.stderr.trim() || sent.stdout.trim() || "agency_report pipeline delivery failed");
+					}
+					const result = JSON.parse(sent.stdout) as { bus?: { id?: string } };
+					return {
+						content: [{ type: "text" as const, text: `Agency pipeline report delivered to orchestrator (${result.bus?.id || "file bus"})` }],
+						details: result,
+					};
+				}
+			}
 			const message = makeAgencyMessage({
 				kind: "report",
-				from: broker.sessionName || "specialist",
+				from,
 				to: "orchestrator",
 				taskId: params.taskId,
 				payload,
