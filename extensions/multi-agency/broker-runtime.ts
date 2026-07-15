@@ -1,9 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgencyBrokerClient, type SendResult } from "./broker/client.ts";
 import { spawnBrokerIfNeeded } from "./broker/spawn.ts";
+import { requireBrokerContext, type AvailableBrokerContext, type BrokerContext } from "./broker/paths.ts";
 import type { AgencyMessage, AgencySessionInfo } from "./broker/types.ts";
 
-type Identity = {
+export type AgencyIdentity = {
 	isHub?: boolean;
 	isTemporary?: boolean;
 	instance?: {
@@ -17,8 +18,13 @@ type Identity = {
 };
 
 export type AgencyInboundHandler = (from: AgencySessionInfo, message: AgencyMessage) => void | Promise<void>;
+export type AgencyTransportId = `agency:${string}:${string}`;
 
-function instanceName(identity: Identity | null): string | null {
+export function buildAgencyTransportId(context: AvailableBrokerContext, logicalName: string): AgencyTransportId {
+	return `agency:${context.projectKey}:${logicalName}`;
+}
+
+function instanceName(identity: AgencyIdentity | null): string | null {
 	return identity?.instance?.intercomName || (identity?.isHub ? "orchestrator" : null);
 }
 
@@ -29,14 +35,25 @@ function statusText(ui: ExtensionContext["ui"] | null, text?: string): void {
 export class AgencyBrokerRuntime {
 	private client: AgencyBrokerClient | null = null;
 	private connecting: Promise<void> | null = null;
-	private identity: Identity | null = null;
-	private projectRoot: string;
+	private identity: AgencyIdentity | null = null;
+	private readonly context: BrokerContext;
 	private lastUi: ExtensionContext["ui"] | null = null;
 	private inboundHandlers = new Set<AgencyInboundHandler>();
 	private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-	constructor(projectRoot: string) {
-		this.projectRoot = projectRoot;
+	constructor(context: BrokerContext) {
+		this.context = context;
+	}
+
+	getBrokerStatus(): { projectRoot: string | null; agencyRoot: string | null; projectKey: string | null; endpoint: string | null; connectionState: "connected" | "connecting" | "disconnected" | "unavailable"; diagnostic: string } {
+		return {
+			projectRoot: this.context.projectRoot,
+			agencyRoot: this.context.agencyRoot,
+			projectKey: this.context.projectKey,
+			endpoint: this.context.available ? (this.context.useWindowsTcp ? this.context.portFile : this.context.endpoint) : null,
+			connectionState: !this.context.available ? "unavailable" : this.isConnected() ? "connected" : this.connecting ? "connecting" : "disconnected",
+			diagnostic: this.context.diagnostic,
+		};
 	}
 
 	get sessionName(): string | null {
@@ -52,7 +69,7 @@ export class AgencyBrokerRuntime {
 		return () => this.inboundHandlers.delete(handler);
 	}
 
-	async ensureConnected(identity: Identity | null, ui?: ExtensionContext["ui"] | null): Promise<void> {
+	async ensureConnected(identity: AgencyIdentity | null, ui?: ExtensionContext["ui"] | null): Promise<void> {
 		this.identity = identity;
 		this.lastUi = ui || this.lastUi;
 		const name = instanceName(identity);
@@ -71,12 +88,12 @@ export class AgencyBrokerRuntime {
 		return this.connecting;
 	}
 
-	private async connect(identity: Identity): Promise<void> {
+	private async connect(identity: AgencyIdentity): Promise<void> {
 		const name = instanceName(identity);
 		if (!name || !identity.instance) return;
 		statusText(this.lastUi, "agency broker: connecting…");
-		await spawnBrokerIfNeeded();
-		const client = new AgencyBrokerClient();
+		await spawnBrokerIfNeeded(this.context);
+		const client = new AgencyBrokerClient(this.context);
 		client.on("message", (from: AgencySessionInfo, message: AgencyMessage) => {
 			for (const handler of this.inboundHandlers) void handler(from, message);
 		});
@@ -95,7 +112,7 @@ export class AgencyBrokerRuntime {
 				name,
 				role: identity.instance.role,
 				isHub: Boolean(identity.isHub || identity.instance.role === "orchestrator" || name === "orchestrator"),
-				cwd: identity.instance.cwd || this.projectRoot,
+				cwd: identity.instance.cwd || this.context.projectRoot || process.cwd(),
 				model: process.env.PI_MODEL || process.env.MODEL || "unknown",
 				pid: process.pid,
 				startedAt: Date.now(),
@@ -104,7 +121,7 @@ export class AgencyBrokerRuntime {
 				lifecycle: identity.instance.lifecycle,
 				taskId: identity.instance.taskId,
 			},
-			`agency:${name}`,
+			buildAgencyTransportId(requireBrokerContext(this.context), name),
 		);
 		this.client = client;
 		statusText(this.lastUi, undefined);
@@ -118,7 +135,7 @@ export class AgencyBrokerRuntime {
 		}, 2000);
 	}
 
-	updatePresence(identity: Identity | null = this.identity, status?: string): void {
+	updatePresence(identity: AgencyIdentity | null = this.identity, status?: string): void {
 		if (!identity?.instance || !this.client?.isConnected()) return;
 		this.client.updatePresence({
 			name: instanceName(identity) || undefined,

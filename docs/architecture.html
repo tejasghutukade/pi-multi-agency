@@ -678,14 +678,20 @@ flowchart TB
             <tr><td>Orchestrator</td><td><code>orchestrator</code></td><td>project root</td></tr>
             <tr><td>Persistent specialist</td><td>role id (<code>plan</code>, <code>work</code>, …)</td><td>project root</td></tr>
             <tr><td>Temporary specialist</td><td><code>role-t{short}</code></td><td>project root</td></tr>
-            <tr><td>Scout reference-repo</td><td><code>scout-t*</code></td><td>optional <code>--cwd</code> / <code>agency_spawn.cwd</code>; <code>AGENCY_ROOT</code> still this project’s <code>.pi/agency</code></td></tr>
+            <tr><td>Scout reference-repo</td><td><code>scout-t*</code></td><td>optional <code>--cwd</code> / <code>agency_spawn.cwd</code>; <code>AGENCY_PROJECT_ROOT</code> + <code>AGENCY_ROOT</code> still identify the originating project</td></tr>
           </tbody>
         </table>
       </div>
 
       <div class="panel" style="margin-top: 1rem;">
+        <h3>Project-owned broker context</h3>
+        <p>Each initialized project keeps broker PID, lock, credential, and state files beneath <code>&lt;project&gt;/.pi/agency/runtime/broker</code>. The bounded project namespace derives only from canonical project identity; the full internal transport ID then appends the logical name: <code>agency:&lt;project-key&gt;:&lt;logical-name&gt;</code>. Logical names and message envelopes stay unchanged. Unix listens on a bounded project-keyed socket in the owner-only per-user <code>/tmp/pi-agency-&lt;uid&gt;/</code> directory. Managed commands set <code>AGENCY_PROJECT_ROOT</code> and <code>AGENCY_ROOT</code> before Pi starts, even when a reference-repository cwd differs. Missing or conflicting ownership fails closed instead of selecting the legacy user-global broker.</p>
+        <p style="margin-top: .6rem;"><strong>Upgrade:</strong> pause delegation → drain/abandon active work → quit the complete project cohort → restart hub and specialists → run <code>/agency-broker-status</code> in every pane → resume only when project key, endpoint family, and <code>connected</code> state agree. <code>/reload</code> alone cannot migrate process environment; global broker cleanup is optional and never automatic. The boundary is trusted same-user local processes; Windows named-pipe access remains a manual platform validation when CI is unavailable.</p>
+      </div>
+
+      <div class="panel" style="margin-top: 1rem;">
         <ul class="bullets">
-          <li><strong>Boot (hardened):</strong> write manifest <code>starting</code> → cmux split → <code>pi --approve --name … "$(cat artifacts/_boot/&lt;name&gt;.txt)"</code> so the first turn starts without a manual paste → mark idle → delegate. Optional <code>--nudge</code> fallback after <code>--boot-wait</code> (default 5s).</li>
+          <li><strong>Boot (hardened):</strong> write manifest <code>starting</code> → cmux split → shell-quote both project ownership variables before <code>pi --approve --name … "$(cat artifacts/_boot/&lt;name&gt;.txt)"</code> → mark idle → delegate. Prompt-time exports do not configure the already-running Pi process.</li>
           <li><strong>Temp teardown:</strong> after complete/fail → close pane, clear row.</li>
           <li><strong>Persistent:</strong> mark idle and keep pane; release only on explicit end-of-workflow.</li>
           <li><strong>Promote:</strong> temp still needed → set <code>lifecycle: persistent</code> (rename to role id if free).</li>

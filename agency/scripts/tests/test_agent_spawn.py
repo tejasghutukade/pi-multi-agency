@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import agent_spawn as asp
+from pi_launch import shell_quote
 import pytest
 
 
@@ -24,9 +25,12 @@ class FakeCtl:
 
 @pytest.fixture
 def spawn_env(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("AGENCY_ROOT", str(tmp_path))
-    monkeypatch.setenv("AGENCY_PROJECT_ROOT", str(tmp_path))
-    (tmp_path / "agents.yaml").write_text(
+    project = tmp_path / "owner project"
+    root = project / ".pi" / "agency"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("AGENCY_ROOT", str(root))
+    monkeypatch.setenv("AGENCY_PROJECT_ROOT", str(project))
+    (root / "agents.yaml").write_text(
         """agents:
   scout:
     lifecycleDefault: temporary
@@ -40,9 +44,9 @@ spawn:
   allowWorkTwin: false
 """
     )
-    (tmp_path / "sessions.json").write_text(json.dumps({"version": 1, "instances": []}) + "\n")
-    monkeypatch.setattr(asp, "_ctl", lambda: FakeCtl(tmp_path))
-    return tmp_path
+    (root / "sessions.json").write_text(json.dumps({"version": 1, "instances": []}) + "\n")
+    monkeypatch.setattr(asp, "_ctl", lambda: FakeCtl(root))
+    return root
 
 
 def test_reuse_idle(spawn_env: Path):
@@ -78,6 +82,27 @@ def test_dry_run_creates_idle_row(spawn_env: Path):
     assert len(data["instances"]) == 1
 
 
+def test_persistent_specialist_uses_canonical_role_name_and_lifecycle(spawn_env: Path):
+    result = asp.spawn_specialist("planner", dry_run=True, boot_wait=0)
+    assert result["instance"]["intercomName"] == "planner"
+    assert result["instance"]["role"] == "planner"
+    assert result["instance"]["lifecycle"] == "persistent"
+
+
+def test_recovery_launch_passes_explicit_surface_gate_override(spawn_env: Path, monkeypatch):
+    recoveries: list[bool] = []
+
+    class RecoveryCtl(FakeCtl):
+        def require_orchestrator(self, root, *, recovery=False):
+            recoveries.append(recovery)
+            return {"intercomName": "orchestrator"}
+
+    monkeypatch.setattr(asp, "_ctl", lambda: RecoveryCtl(spawn_env))
+    result = asp.spawn_specialist("scout", recovery=True, dry_run=True, boot_wait=0)
+    assert result["action"] == "spawn-dry-run"
+    assert recoveries == [True]
+
+
 def test_spawn_nudge_is_noop_compatibility_arg():
     assert asp.spawn_specialist.__kwdefaults__["nudge"] is False
     text = asp.bootstrap_text("worker", None, ".pi/agency/charters/worker.md", None, "/tmp/agency")
@@ -93,7 +118,8 @@ def test_bootstrap_uses_broker_tools_only(spawn_env: Path):
         None,
         str(spawn_env),
     )
-    assert f'export AGENCY_ROOT="{spawn_env}"' in text
+    assert f"Agency ownership was established before Pi started at {spawn_env}." in text
+    assert 'export AGENCY_ROOT=' not in text
     assert 'export BUS=' not in text
     assert f'export MEMORY="{asp.scripts_dir() / "memory.py"}"' in text
     assert 'python3 "$BUS" recv --as work --wait 60 --interval 2' not in text
@@ -119,6 +145,41 @@ def test_packaged_prompts_do_not_recommend_project_script_paths():
                 if any(needle in text for needle in needles):
                     offenders.append(str(path.relative_to(repo)))
     assert offenders == []
+
+
+def test_reference_repo_spawn_keeps_owner_context_before_pi(spawn_env: Path, tmp_path: Path, monkeypatch):
+    reference = tmp_path / "reference repo"
+    reference.mkdir()
+    sent: list[str] = []
+    monkeypatch.setattr(asp, "open_pane", lambda *args, **kwargs: {"surface": "surface:1", "pane": "pane:1"})
+    monkeypatch.setattr(asp, "send_to_surface", lambda _surface, command: sent.append(command))
+
+    result = asp.spawn_specialist("scout", cwd=str(reference), boot_wait=0)
+    owner = spawn_env.parent.parent
+    assert result["instance"]["cwd"] == str(reference.resolve())
+    assert sent[0].startswith(
+        f"cd {shell_quote(str(reference.resolve()))} && "
+        f"AGENCY_ROOT={shell_quote(str(spawn_env.resolve()))} "
+        f"AGENCY_PROJECT_ROOT={shell_quote(str(owner.resolve()))} pi "
+    )
+
+
+def test_managed_guidance_uses_broker_status_not_prompt_time_exports():
+    repo = Path(__file__).resolve().parents[3]
+    guidance = [
+        repo / "skills" / "agency-orchestrator" / "SKILL.md",
+        repo / "agency" / "skills" / "orchestrator" / "SKILL.md",
+        *[
+            repo / "agency" / "charters" / f"{name}.md"
+            for name in ("orchestrator", "scout", "brainstorm", "planner", "worker", "debug", "coderev", "docrev")
+        ],
+    ]
+    for path in guidance:
+        text = path.read_text()
+        assert "/agency-broker-status" in text, path
+    for path in guidance[2:]:
+        on_each = path.read_text().split("## On each delegation", 1)[-1]
+        assert '`export AGENCY_ROOT="<project>/.pi/agency"`' not in on_each, path
 
 
 def test_dual_entry_same_function():

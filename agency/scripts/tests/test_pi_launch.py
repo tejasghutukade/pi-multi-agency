@@ -56,8 +56,10 @@ def test_build_pi_command_variants(tmp_path: Path):
         agent_path=persona,
         tools=" read, grep , ",
         boot_path=boot,
+        agency_root="/owner/.pi/agency",
+        agency_project_root="/owner",
     )
-    assert "cd '/proj' && pi --approve --name 'scout-t01'" in cmd
+    assert "cd '/proj' && AGENCY_ROOT='/owner/.pi/agency' AGENCY_PROJECT_ROOT='/owner' pi --approve --name 'scout-t01'" in cmd
     assert f"--append-system-prompt '{persona}'" in cmd
     assert "--tools 'read,grep'" in cmd
     assert f'"$(cat \'{boot}\')"' in cmd
@@ -67,6 +69,20 @@ def test_build_pi_command_variants(tmp_path: Path):
 
     no_extra = pl.build_pi_command(work="/p", instance_name="x")
     assert no_extra == "cd '/p' && pi --approve --name 'x'"
+
+
+def test_build_pi_command_quotes_project_context_before_pi():
+    cmd = pl.build_pi_command(
+        work="/reference repo/it's here",
+        instance_name="scout",
+        agency_root="/owner project's/.pi/agency",
+        agency_project_root="/owner project's",
+    )
+    assert cmd.startswith(
+        "cd '/reference repo/it'\"'\"'s here' && "
+        "AGENCY_ROOT='/owner project'\"'\"'s/.pi/agency' "
+        "AGENCY_PROJECT_ROOT='/owner project'\"'\"'s' pi "
+    )
 
 
 def test_launch_pi_opens_and_sends(fake_cmux: FakeRunner):

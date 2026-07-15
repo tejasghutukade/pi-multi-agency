@@ -1,27 +1,28 @@
 import net from "node:net";
 import { randomUUID } from "node:crypto";
-import { unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { unlinkSync } from "node:fs";
 import { createMessageReader, writeMessage } from "./framing.ts";
 import {
 	AGENCY_BROKER_PROTOCOL_NAME,
 	AGENCY_BROKER_PROTOCOL_VERSION,
-	AGENCY_BROKER_RUNTIME_FILE_MODE,
 	ensureAgencyBrokerRuntimeDir,
-	getAgencyBrokerDirPath,
+	ensureAgencyBrokerSocketDir,
 	getBrokerListenTarget,
-	getBrokerPortFilePath,
+	requireBrokerContext,
+	resolveBrokerContext,
 	restrictAgencyBrokerRuntimeFile,
+	writeAgencyBrokerRuntimeFile,
 	type BrokerConnectTarget,
 } from "./paths.ts";
 import type { AgencySessionInfo, AgencySessionRegistration, BrokerMessage } from "./types.ts";
 import { isBrokerMessageEnvelope } from "../messages.ts";
 
 // Adapted from pi-intercom (MIT, Copyright (c) 2026 Nico Bailon).
-const BROKER_DIR = getAgencyBrokerDirPath();
-const LISTEN_TARGET = getBrokerListenTarget();
-const PID_PATH = join(BROKER_DIR, "broker.pid");
-const PORT_PATH = getBrokerPortFilePath(BROKER_DIR);
+const BROKER_CONTEXT = requireBrokerContext(resolveBrokerContext());
+const BROKER_DIR = BROKER_CONTEXT.brokerDir;
+const LISTEN_TARGET = getBrokerListenTarget(BROKER_CONTEXT);
+const PID_PATH = BROKER_CONTEXT.pidFile;
+const PORT_PATH = BROKER_CONTEXT.portFile;
 const BROKER_STATE_ID = randomUUID();
 const MAX_SESSIONS = 128;
 const MAX_UNREGISTERED_CONNECTIONS = 32;
@@ -90,8 +91,9 @@ class AgencyBroker {
 	private readonly askTimeoutMs = Number.isFinite(ASK_TIMEOUT_MS) ? ASK_TIMEOUT_MS : 600_000;
 
 	constructor() {
-		ensureAgencyBrokerRuntimeDir(BROKER_DIR);
-		if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") {
+		ensureAgencyBrokerRuntimeDir(BROKER_DIR, BROKER_CONTEXT.platform, BROKER_CONTEXT.agencyRoot);
+		ensureAgencyBrokerSocketDir(BROKER_CONTEXT);
+		if (typeof LISTEN_TARGET === "string" && BROKER_CONTEXT.platform !== "win32") {
 			try { unlinkSync(LISTEN_TARGET); } catch { /* clean startup */ }
 		}
 		this.server = net.createServer(this.handleConnection.bind(this));
@@ -100,16 +102,14 @@ class AgencyBroker {
 	start(): void {
 		const onListening = () => {
 			if (typeof LISTEN_TARGET === "string") {
-				restrictAgencyBrokerRuntimeFile(LISTEN_TARGET);
+				restrictAgencyBrokerRuntimeFile(LISTEN_TARGET, BROKER_CONTEXT.platform);
 			} else {
 				const address = this.server.address();
 				if (!address || typeof address === "string") throw new Error("Agency broker started without TCP address");
 				const endpoint: BrokerConnectTarget = { transport: "tcp", host: LISTEN_TARGET.host, port: address.port, stateId: BROKER_STATE_ID };
-				writeFileSync(PORT_PATH, `${JSON.stringify(endpoint)}\n`, { mode: AGENCY_BROKER_RUNTIME_FILE_MODE });
-				restrictAgencyBrokerRuntimeFile(PORT_PATH);
+				writeAgencyBrokerRuntimeFile(PORT_PATH, `${JSON.stringify(endpoint)}\n`, BROKER_CONTEXT.platform);
 			}
-			writeFileSync(PID_PATH, String(process.pid), { mode: AGENCY_BROKER_RUNTIME_FILE_MODE });
-			restrictAgencyBrokerRuntimeFile(PID_PATH);
+			writeAgencyBrokerRuntimeFile(PID_PATH, String(process.pid), BROKER_CONTEXT.platform);
 			console.log(`Agency broker started (pid: ${process.pid})`);
 		};
 		if (typeof LISTEN_TARGET === "string") this.server.listen(LISTEN_TARGET, onListening);
@@ -212,7 +212,7 @@ class AgencyBroker {
 			case "register": {
 				if (!isSessionRegistration(clientMessage.session)) throw new Error("Invalid register message");
 				if (currentId) throw new Error("Received duplicate register message");
-				let id = randomUUID();
+				let id: string = randomUUID();
 				if (clientMessage.sessionId !== undefined) {
 					if (!isSessionId(clientMessage.sessionId)) throw new Error("Invalid register sessionId");
 					id = clientMessage.sessionId;
@@ -336,7 +336,7 @@ class AgencyBroker {
 					for (const key of ["name", "role", "status", "model"] as const) {
 						if (clientMessage[key] !== undefined) {
 							if (typeof clientMessage[key] !== "string") throw new Error(`Invalid presence ${key}`);
-							if (session.info[key] !== clientMessage[key]) { (session.info as Record<string, unknown>)[key] = clientMessage[key]; changed = true; }
+							if (session.info[key] !== clientMessage[key]) { (session.info as unknown as Record<string, unknown>)[key] = clientMessage[key]; changed = true; }
 						}
 					}
 					if (clientMessage.taskId !== undefined) {
@@ -382,7 +382,7 @@ class AgencyBroker {
 		for (const session of this.sessions.values()) session.socket.end();
 		this.sessions.clear();
 		this.askEdges.clear();
-		if (typeof LISTEN_TARGET === "string" && process.platform !== "win32") { try { unlinkSync(LISTEN_TARGET); } catch { /* ignore */ } }
+		if (typeof LISTEN_TARGET === "string" && BROKER_CONTEXT.platform !== "win32") { try { unlinkSync(LISTEN_TARGET); } catch { /* ignore */ } }
 		try { unlinkSync(PORT_PATH); } catch { /* ignore */ }
 		try { unlinkSync(PID_PATH); } catch { /* ignore */ }
 		this.server.close();

@@ -22,7 +22,7 @@ You are the **Planner** specialist for Multi-Agency. Turn requirements (or a rou
 
 ## On each delegation
 
-1. `export AGENCY_ROOT="<project>/.pi/agency"`
+1. Run `/agency-broker-status`; if the project roots/key are unavailable or mismatched, ask the Orchestrator for a full cohort restart. Do not attempt a prompt-time export or `/reload` repair.
 2. Use broker-injected delegates/replies in this Pi session.
 3. Optionally: `python3 "$MEMORY" init --as <instanceName> --role planner`
 4. Process broker-injected `delegate` / `reply` messages.

@@ -20,7 +20,7 @@ You are the **Brainstorm** specialist for Multi-Agency. Explore **WHAT** to buil
 
 ## On each delegation
 
-1. `export AGENCY_ROOT="<project>/.pi/agency"`
+1. Run `/agency-broker-status`; if the project roots/key are unavailable or mismatched, ask the Orchestrator for a full cohort restart. Do not attempt a prompt-time export or `/reload` repair.
 2. Wait for broker-injected delegates/replies in this Pi session.
 3. Read `skillPath` (ce-brainstorm) and follow it.
 4. Use Scout `contextPaths` from the packet.

@@ -43,15 +43,17 @@ python3 /path/to/multi-agency/agency/scripts/agency_ctl.py hub-start
 # or in any pi session after install: /agency-hub
 ```
 
-Example shape:
+Example shape (the generated command shell-quotes the canonical paths):
 
 ```bash
-pi --approve --name orchestrator \
+cd "$PWD" && \
+  AGENCY_ROOT="$PWD/.pi/agency" AGENCY_PROJECT_ROOT="$PWD" \
+  pi --approve --name orchestrator \
   --tools read,grep,find,ls,agency_init,agency_list,agency_spawn,agency_delegate,agency_release \
   --append-system-prompt .pi/agents/orchestrator.md
 ```
 
-4. `/agency-claim` then give a real task (spawn → delegate; stay free for pushed reports)
+4. `/agency-claim`, run `/agency-broker-status`, then give a real task (spawn → delegate; stay free for pushed reports)
 
 The hub **must not** have `edit` / `write` / `bash`. Specialists implement; the Orchestrator only classifies, delegates, and synthesizes.
 
@@ -75,7 +77,15 @@ python3 /path/to/multi-agency/agency/scripts/agency_ctl.py init
 | `agency_delegate` | Send task (`taskId`); hub stays free |
 | `agency_release` | Idle persistent / teardown temp |
 
-Commands: `/agency-init`, `/agency-claim`, `/agency-hub`, `/agency-ops start|stop|status [--port N]`, `/agency_list`, `/agency_release <name> [--mode auto|idle|teardown]`
+Commands: `/agency-init`, `/agency-claim`, `/agency-hub`, `/agency-broker-status`, `/agency-ops start|stop|status [--port N]`, `/agency_list`, `/agency_release <name> [--mode auto|idle|teardown]`
+
+### Project-owned broker and upgrades
+
+Each initialized project owns one broker runtime under `<project>/.pi/agency/runtime/broker`. The owning project root qualifies transport session IDs, while logical agent names and message `from`/`to` fields remain unchanged. A Scout may execute in a reference checkout, but its broker still belongs to the originating project; pane cwd never selects broker ownership.
+
+Managed hub and specialist commands establish both `AGENCY_PROJECT_ROOT` and `AGENCY_ROOT` **before Pi starts**. Typing an `export` into a Pi prompt cannot repair the environment of that already-running Pi process. If a pane reports an unavailable or mismatched context, do not resume delegation.
+
+For an upgrade from the legacy user-global broker: pause new delegation, drain or explicitly abandon active work, quit **every** Pi process in the project's agency cohort, restart the hub and all specialists with the generated commands, and run `/agency-broker-status` in every pane. Resume only when every pane reports the same project key and project-local endpoint family with `connected` state. An extension `/reload` alone is insufficient. Existing global broker processes are left untouched; manual cleanup is optional. This isolation protects trusted same-user local sessions from accidental collision, not from hostile local processes.
 
 After delegate, the **lifecycle bridge** pushes specialist `report`/`ask` into the hub chat when idle, or shows a queue banner while the hub is working. Silent settle without a report triggers abandon + respawn if the specialist does not start again.
 

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>What we fixed: Multi-Agency broker project isolation</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --ink: #1f2933;
+    --muted: #5b6772;
+    --line: #e3e8ee;
+    --brand: #3b6fd4;
+    --bad: #c0392b;
+    --bad-bg: #fdecea;
+    --good: #1f7a4d;
+    --good-bg: #e9f7ef;
+    --warn-bg: #fff6e5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 20px 64px; }
+  header.hero {
+    background: linear-gradient(135deg, #3b6fd4, #5b8def);
+    color: #fff;
+    border-radius: 16px;
+    padding: 28px 28px 24px;
+    box-shadow: 0 8px 24px rgba(59,111,212,0.18);
+  }
+  header.hero h1 { margin: 0 0 6px; font-size: 26px; }
+  header.hero p { margin: 0; opacity: 0.92; font-size: 15px; }
+  .pill {
+    display: inline-block; font-size: 12px; font-weight: 600;
+    background: rgba(255,255,255,0.18); padding: 3px 10px; border-radius: 999px;
+    margin-bottom: 12px; letter-spacing: 0.02em;
+  }
+  section { margin-top: 28px; }
+  h2 { font-size: 20px; margin: 0 0 10px; }
+  h3 { font-size: 16px; margin: 18px 0 6px; }
+  p, li { font-size: 15px; color: var(--ink); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 20px 22px; box-shadow: 0 1px 2px rgba(16,24,40,0.04);
+  }
+  .tldr { background: #eef3ff; border-color: #d4e0fb; }
+  .tldr ul { margin: 8px 0 0; padding-left: 20px; }
+  .tldr li { margin-bottom: 6px; }
+  .analogy { display: flex; gap: 14px; flex-wrap: wrap; }
+  .analogy .office {
+    flex: 1 1 240px; border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; background: #fff;
+  }
+  .analogy .office .tag { font-weight: 700; font-size: 14px; }
+  .analogy .office.a .tag { color: #2563eb; }
+  .analogy .office.b .tag { color: #b45309; }
+  .analogy .desk { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .ba { grid-template-columns: 1fr; } }
+  .ba .col { border-radius: 12px; padding: 16px; }
+  .ba .before { background: var(--bad-bg); border: 1px solid #f3c6c0; }
+  .ba .after { background: var(--good-bg); border: 1px solid #bfe6cf; }
+  .ba h3 { margin-top: 0; }
+  .ba .before h3 { color: var(--bad); }
+  .ba .after h3 { color: var(--good); }
+  .ba ul { padding-left: 18px; margin: 6px 0 0; }
+  .ba li { font-size: 14px; margin-bottom: 6px; }
+  ol.steps { padding-left: 22px; margin: 8px 0 0; }
+  ol.steps li { margin-bottom: 12px; }
+  ol.steps b { color: var(--brand); }
+  .code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: #0f172a; color: #e2e8f0; padding: 12px 14px; border-radius: 10px;
+    font-size: 13px; overflow-x: auto; white-space: pre;
+  }
+  table.gloss { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.gloss th, table.gloss td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.gloss th { background: #f1f5f9; font-weight: 600; }
+  table.gloss td.term { font-weight: 600; color: var(--brand); white-space: nowrap; }
+  .note { background: var(--warn-bg); border: 1px solid #f3dca0; border-radius: 12px; padding: 14px 16px; font-size: 14px; }
+  footer { margin-top: 34px; font-size: 13px; color: var(--muted); text-align: center; }
+  a { color: var(--brand); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="pill">MULTI-AGENCY · PR #4</span>
+    <h1>What we fixed: brokers staying inside their own project</h1>
+    <p>A plain-English guide to the project-isolation bug and the changes that close it. No prior knowledge of this repo required.</p>
+  </header>
+
+  <section class="card tldr">
+    <h2 style="margin-top:0">Read this first (30 seconds)</h2>
+    <ul>
+      <li><b>Multi-Agency</b> lets one "hub" AI coordinate several "specialist" AIs. They talk through a local <b>broker</b> (a tiny message server on your machine).</li>
+      <li><b>The bug:</b> the broker wasn't reliably tied to the project folder that owned it. Agents from a different checkout or worktree could join the wrong broker, or two brokers could collide.</li>
+      <li><b>The fix:</b> every broker now belongs to exactly one project, every message is tagged with that project's ID, and every agent is told its project at startup. Cross-talk is no longer possible.</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <h2>The mental model (the analogy)</h2>
+    <p>Think of each project folder as an <b>office</b>. Inside an office, the team talks over an <b>internal intercom</b> (the broker). The hub is the team lead; specialists are teammates in other rooms.</p>
+    <div class="analogy">
+      <div class="office a">
+        <div class="tag">Office A — project "alpha"</div>
+        <div class="desk">Its own intercom box.<br/>Only alpha's team can speak on it.</div>
+      </div>
+      <div class="office b">
+        <div class="tag">Office B — project "beta"</div>
+        <div class="desk">Its own intercom box.<br/>Only beta's team can speak on it.</div>
+      </div>
+    </div>
+    <p style="margin-top:14px"><b>The bug was like the two intercoms being cross-wired:</b> someone in Office B could accidentally hear Office A's meetings, or both offices fought over one shared box. Our fix re-labels every intercom with its office name and makes sure each box is installed inside its own office.</p>
+  </section>
+
+  <section class="card">
+    <h2>What was actually broken</h2>
+    <ul>
+      <li>The code sometimes picked the <b>wrong "home folder"</b> for the broker — e.g. a nested sub-folder, a sibling worktree, or a reference repo you were just scanning.</li>
+      <li>Messages were not clearly <b>stamped with the project they belonged to</b>, so a "scout" running inside a different checkout could end up on the wrong broker.</li>
+      <li>Agents were expected to set their project environment <b>after</b> they had already started, which doesn't work — a running process can't repair its own environment from a chat command.</li>
+      <li>The broker's connection address (a "socket" file) could get <b>too long</b> in deep folders and simply fail to start.</li>
+      <li>The "only one broker at a time" lock could be <b>stolen or leaked</b>, letting two brokers fight over the same files.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Before vs after</h2>
+    <div class="ba">
+      <div class="col before">
+        <h3>Before (buggy)</h3>
+        <ul>
+          <li>Broker home decided loosely; can land outside the real project.</li>
+          <li>Messages not project-tagged → cross-project chatter possible.</li>
+          <li>Agent told its project mid-conversation (too late).</li>
+          <li>Socket path = full folder path → can break in deep folders.</li>
+          <li>Startup lock can expire a live owner or leak a process.</li>
+        </ul>
+      </div>
+      <div class="col after">
+        <h3>After (fixed)</h3>
+        <ul>
+          <li>Broker home = the <b>true project root</b>; wrong roots are rejected.</li>
+          <li>Every message stamped <code>agency:&lt;project&gt;:&lt;name&gt;</code> → strict separation.</li>
+          <li>Agent told its project <b>before it starts</b> (env vars at launch).</li>
+          <li>Socket in a short, private, owner-only folder → always starts.</li>
+          <li>Lock uses owner tokens; live owners protected; children reaped on failure.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>What changed, in plain English</h2>
+    <ol class="steps">
+      <li><b>Find the real project.</b> We added one clear rule for "where does this project live?" — prefer the initialized project, resolve symlinks to their true location, fall back to the package root, and <b>refuse</b> if the agency folder escapes outside the project.</li>
+      <li><b>Tag every conversation with the project.</b> Broker session IDs now look like <code>agency:&lt;projectKey&gt;:&lt;agentName&gt;</code>. Two projects can never share a session, but replacing an agent with the same name <i>within</i> the same project still works.</li>
+      <li><b>Tell agents their project at launch.</b> The command that spawns each agent now sets <code>AGENCY_ROOT</code> and <code>AGENCY_PROJECT_ROOT</code> <b>before</b> the <code>pi</code> process starts. (Typing <code>export</code> in a chat later can't fix it — so we moved it earlier.)</li>
+      <li><b>Short, safe connection address.</b> Instead of a socket file buried in the deep project path, we use a small private folder like <code>/tmp/pi-agency-&lt;you&gt;/&lt;project&gt;.sock</code> with owner-only permissions. Project data still lives under <code>.pi/agency</code>.</li>
+      <li><b>Safer broker startup.</b> The startup lock now carries an owner token. A broker that is still alive is never declared "stale," only the true owner can release the lock, and if startup fails we clean up the spawned process instead of leaving it running.</li>
+      <li><b>Hub connects right when you claim it.</b> Running <code>/agency-claim</code> now immediately connects the broker and reports status, so the documented order is: <code>/agency-claim</code> → <code>/agency-broker-status</code> → <code>agency_list</code>.</li>
+    </ol>
+    <p style="margin-top:6px">Docs, charters, README, and the orchestrator skill were updated to match this new, correct sequence.</p>
+  </section>
+
+  <section class="card">
+    <h2>Key terms</h2>
+    <table class="gloss">
+      <tr><th>Term</th><th>What it means here</th></tr>
+      <tr><td class="term">Project / project root</td><td>The folder containing your code and its <code>.pi/agency</code> setup. The "office" in the analogy.</td></tr>
+      <tr><td class="term">Broker</td><td>A tiny local server that delivers messages between the hub and specialists. The "intercom."</td></tr>
+      <tr><td class="term">Hub</td><td>The coordinator agent (usually named <code>orchestrator</code>) that delegates work.</td></tr>
+      <tr><td class="term">Specialist</td><td>A worker agent spawned by the hub (Planner, Worker, Researcher, etc.).</td></tr>
+      <tr><td class="term">Transport ID / session ID</td><td>The unique address a broker uses for one agent, now prefixed with the project key.</td></tr>
+      <tr><td class="term">Worktree</td><td>A separate working copy of the same repo (common with git). Each must have its <b>own</b> broker.</td></tr>
+      <tr><td class="term">Socket</td><td>A file on disk that acts as the broker's "phone line" for local processes.</td></tr>
+      <tr><td class="term">Lock</td><td>A marker file that ensures only one broker starts for a project at a time.</td></tr>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Show me the one-line essence</h2>
+    <p>Every broker and every message is now scoped to the project that owns it:</p>
+    <div class="code">agency:&lt;projectKey&gt;:&lt;agentName&gt;</div>
+    <p style="margin-top:10px">If the project key differs, the agents simply cannot see each other — which is exactly the isolation we wanted.</p>
+  </section>
+
+  <section class="note">
+    <b>Good to know (not bugs):</b> This protects <i>trusted, same-user</i> local sessions from <b>accidental</b> collision. It is not a security wall against a hostile process on the same machine. Windows-specific named-pipe behavior still needs a manual check on a Windows machine; everything else is covered by automated tests (37 broker tests + 65 Python tests).
+  </section>
+
+  <footer>
+    Companion to PR #4 · <code>fix(multi-agency): scope broker to owning project and qualify transport IDs</code><br/>
+    See <code>docs/plans/2026-07-15-001-fix-agency-broker-project-isolation-plan.md</code> for the full technical plan.
+  </footer>
+
+</div>
+</body>
+</html>

@@ -51,6 +51,7 @@ from ledger import (  # noqa: E402
     save_sessions,
     specialist_count,
 )
+from pi_launch import build_pi_command  # noqa: E402
 
 HUB = "orchestrator"
 assert CATALOG_HUB == HUB
@@ -480,7 +481,7 @@ def cmd_init(args: argparse.Namespace) -> int:
                 "next": [
                     "Open this project inside cmux",
                     hub_start_command(proj),
-                    "/reload → /agency-claim → agency_list",
+                    "/agency-claim → /agency-broker-status → agency_list",
                 ],
                 "hubTools": HUB_TOOLS,
             },
@@ -491,14 +492,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def hub_start_command(proj: Path | None = None) -> str:
-    """Canonical Orchestrator hub launch (persona + tools lock)."""
+    """Canonical Orchestrator hub launch with project ownership set before Pi starts."""
     root = (proj or project_root()).resolve()
     persona = root / ".pi" / "agents" / "orchestrator.md"
     if not persona.is_file():
         persona = package_root() / "agents" / "orchestrator.md"
-    return (
-        f"pi --approve --name {HUB} --tools {HUB_TOOLS} "
-        f"--append-system-prompt {persona}"
+    return build_pi_command(
+        work=str(root),
+        instance_name=HUB,
+        tools=HUB_TOOLS,
+        agent_path=persona,
+        agency_root=str(root / ".pi" / "agency"),
+        agency_project_root=str(root),
     )
 
 
@@ -517,7 +522,7 @@ def cmd_hub_start(args: argparse.Namespace) -> int:
                     "Run inside cmux from the project root",
                     "Requires /agency-init once so .pi/agents/orchestrator.md exists",
                     "Hub must not have edit/write/bash — specialists implement",
-                    "Then /reload → /agency-claim → agency_list",
+                    "Then restart the full agency cohort → /agency-claim → /agency-broker-status → agency_list",
                 ],
             },
             indent=2,
