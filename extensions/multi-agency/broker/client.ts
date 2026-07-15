@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { createMessageReader, writeMessage } from "./framing.ts";
-import { getBrokerConnectTarget, type BrokerConnectTarget } from "./paths.ts";
+import { getBrokerConnectTarget, type BrokerConnectTarget, type BrokerContext } from "./paths.ts";
 import type { AgencyMessage, AgencySessionInfo, AgencySessionRegistration, BrokerMessageEnvelope } from "./types.ts";
 import { isAgencyMessage, isBrokerMessageEnvelope, toBrokerEnvelope } from "../messages.ts";
 
@@ -40,6 +40,12 @@ export class AgencyBrokerClient extends EventEmitter {
 	private pendingAsks = new Map<string, { resolve: (m: AgencyMessage) => void; reject: (e: Error) => void; timeout: ReturnType<typeof setTimeout> }>();
 	private disconnecting = false;
 	private disconnectError: Error | null = null;
+	private readonly context: BrokerContext;
+
+	constructor(context: BrokerContext) {
+		super();
+		this.context = context;
+	}
 
 	get sessionId(): string | null { return this._sessionId; }
 
@@ -74,7 +80,7 @@ export class AgencyBrokerClient extends EventEmitter {
 			let socket: net.Socket;
 			let target: BrokerConnectTarget;
 			try {
-				target = getBrokerConnectTarget();
+				target = getBrokerConnectTarget(this.context);
 				socket = connectToBrokerTarget(target);
 			} catch (error) {
 				reject(toError(error));

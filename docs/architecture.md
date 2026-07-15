@@ -162,12 +162,22 @@ flowchart TB
 - Temporary names must be unique in `sessions.json` for the session.
 - Reused persistent agents **keep** their name across tasks.
 
+### Project-owned broker context
+
+Each initialized project owns one broker runtime whose PID, port-state, spawn-lock, credential, and other fixed state files stay at `<canonical-project>/.pi/agency/runtime/broker`. The bounded project namespace derives **only** from the canonical project identity. A full internal transport ID appends the logical name (`agency:<project-key>:<logical-name>`); logical `intercomName`, role, ACL behavior, ledger rows, inbox names, and message envelope `from`/`to` values do not change. On Unix the listen endpoint is the bounded project-keyed socket in the owner-only per-user `/tmp/pi-agency-<uid>/` directory; Windows retains its bounded pipe/TCP endpoint behavior.
+
+Managed hub, specialist, and recovery commands set both `AGENCY_PROJECT_ROOT` and `AGENCY_ROOT` in the shell command **before** `pi` starts. Runtime discovery is defensive: a plain Pi launch under an initialized ancestor derives that same context, while an uninitialized launch stays disconnected with guidance instead of falling back to `~/.pi/agent/agency-broker`. Conflicting ownership inputs fail closed. Project-key and endpoint derivation never uses pane cwd, project basename, or logical agent name; only the full transport ID's final segment uses the logical name.
+
+The broker runtime is trusted-local collision isolation, not hostile same-account authentication. Unix socket and project runtime directories/files retain owner-only modes; Windows TCP state retains its credential. Windows named-pipe access remains in the current-user local-process trust boundary and needs manual platform validation when Windows CI is unavailable.
+
+**Forward-only upgrade:** pause new delegation → drain or explicitly abandon active work → quit every Pi process in the project's agency cohort → restart hub and specialists with canonical generated commands → run `/agency-broker-status` in every pane → resume only when all panes show the same project key, project-owned endpoint family, and `connected` state. `/reload` cannot repair a Pi process that started without ownership variables. Legacy global broker processes are neither selected nor terminated; optional manual cleanup is separate.
+
 ### Working directory (cwd)
 
 | Agent | cwd |
 |-------|-----|
 | Orchestrator + specialists (default) | Project root |
-| Scout `reference-repo` mode | Optional spawn `--cwd` / `agency_spawn.cwd` = reference checkout; `AGENCY_ROOT` still points at **this** project's `.pi/agency` |
+| Scout `reference-repo` mode | Optional spawn `--cwd` / `agency_spawn.cwd` = reference checkout; both `AGENCY_PROJECT_ROOT` and `AGENCY_ROOT` still identify the **originating** project |
 
 Scout skill (custom, not ce-ideate/ce-sweep): `.pi/agency/skills/scout/SKILL.md` — modes `repo-recon` \| `prior-art` \| `reference-repo`.
 
@@ -175,7 +185,7 @@ Scout skill (custom, not ce-ideate/ce-sweep): `.pi/agency/skills/scout/SKILL.md`
 
 1. Write pending row to `.pi/agency/sessions.json` (`status: starting`).
 2. `cmux new-split right` (or equivalent) for a visible pane.
-3. Start pi in that pane with the persona bootstrap (Phase 1: skill/prompt; Phase 2: `.pi/agents/<role>.md`).
+3. Start Pi with shell-quoted `AGENCY_PROJECT_ROOT` and `AGENCY_ROOT` assignments before the `pi` executable, independently of pane cwd, plus the persona bootstrap (Phase 1: skill/prompt; Phase 2: `.pi/agents/<role>.md`).
 4. Child runs `/name <intercom-name>`.
 5. Orchestrator polls `intercom({ action: "list" })` until the name appears (timeout ~60s).
 6. Mark row `idle` / `ready`, store cmux surface id + pi session id when known.

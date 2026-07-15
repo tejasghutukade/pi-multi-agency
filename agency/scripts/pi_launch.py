@@ -29,8 +29,20 @@ def build_pi_command(
     tools: str | None = None,
     boot_path: Path | None = None,
     message: str | None = None,
+    agency_root: str | None = None,
+    agency_project_root: str | None = None,
 ) -> str:
-    parts = [f"cd {shell_quote(work)} && pi --approve --name {shell_quote(instance_name)}"]
+    if (agency_root is None) != (agency_project_root is None):
+        raise ValueError("agency_root and agency_project_root must be provided together")
+    environment = ""
+    if agency_root is not None and agency_project_root is not None:
+        environment = (
+            f"AGENCY_ROOT={shell_quote(agency_root)} "
+            f"AGENCY_PROJECT_ROOT={shell_quote(agency_project_root)} "
+        )
+    parts = [
+        f"cd {shell_quote(work)} && {environment}pi --approve --name {shell_quote(instance_name)}"
+    ]
     if agent_path:
         parts.append(f"--append-system-prompt {shell_quote(str(agent_path))}")
     if tools:
@@ -55,6 +67,8 @@ def launch_pi(
     direction: str = "right",
     focus: bool = False,
     enter: bool = True,
+    agency_root: str | None = None,
+    agency_project_root: str | None = None,
 ) -> dict[str, Any]:
     """Open a pane and send a pi command. Returns {surface, pane, command, ...open_pane fields}."""
     command = build_pi_command(
@@ -64,6 +78,8 @@ def launch_pi(
         tools=tools,
         boot_path=boot_path,
         message=message,
+        agency_root=agency_root,
+        agency_project_root=agency_project_root,
     )
     opened = open_pane(direction, command=command, focus=focus, enter=enter)
     return {**opened, "command": command}

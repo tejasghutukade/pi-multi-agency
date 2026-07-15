@@ -72,7 +72,7 @@ def bootstrap_text(
     return (
         f"{persona} {skill_line} "
         f"Your broker instance name is {instance_name}. "
-        f'export AGENCY_ROOT="{agency_export}"; '
+        f"Agency ownership was established before Pi started at {agency_export}. "
         f'export MEMORY="{memory}"; '
         "All agency messages go through the agency_report / agency_ask / agency_progress tools — "
         "do NOT call bus.py or any bus script directly. "
@@ -250,6 +250,8 @@ def spawn_specialist(
         agent_path=agent_path,
         tools=tools,
         boot_path=boot_path,
+        agency_root=str(root.resolve()),
+        agency_project_root=str(project_root().resolve()),
     )
 
     try:

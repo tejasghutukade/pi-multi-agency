@@ -11,9 +11,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { registerAgencyBrokerCommands } from "./broker-commands.ts";
 import { AgencyBrokerRuntime } from "./broker-runtime.ts";
+import { discoverProjectRoot, resolveBrokerContext } from "./broker/paths.ts";
 import { installLifecycleBridge } from "./lifecycle.ts";
 import { makeAgencyMessage } from "./messages.ts";
 
@@ -30,19 +32,6 @@ function findPackageRoot(): string {
 		cur = parent;
 	}
 	return path.resolve(EXT_DIR, "../..");
-}
-
-function findProjectRoot(start: string): string {
-	let cur = path.resolve(start);
-	for (let i = 0; i < 12; i++) {
-		if (fs.existsSync(path.join(cur, ".pi", "agency")) || fs.existsSync(path.join(cur, "package.json"))) {
-			return cur;
-		}
-		const parent = path.dirname(cur);
-		if (parent === cur) break;
-		cur = parent;
-	}
-	return path.resolve(start);
 }
 
 function agencyCtlPath(packageRoot: string): string {
@@ -317,13 +306,15 @@ function formatAgencyRelease(payload: AgencyReleasePayload): string {
 
 export default function multiAgencyExtension(pi: ExtensionAPI) {
 	const packageRoot = findPackageRoot();
-	const projectRoot = findProjectRoot(process.cwd());
+	const brokerContext = resolveBrokerContext({ env: process.env, cwd: process.cwd() });
+	const projectRoot = brokerContext.projectRoot || discoverProjectRoot(process.cwd()).projectRoot;
 	const ctl = (args: string[], signal?: AbortSignal) => runCtl(packageRoot, projectRoot, args, signal);
-	const broker = new AgencyBrokerRuntime(projectRoot);
+	const broker = new AgencyBrokerRuntime(brokerContext);
 
 	installLifecycleBridge(pi, ctl, broker);
+	registerAgencyBrokerCommands(pi, ctl, broker);
 
-	const commandAgencyList = async (_args: string, ctx: { ui: { notify: (msg: string, level?: string) => void } }) => {
+	const commandAgencyList = async (_args: string, ctx: ExtensionCommandContext) => {
 		const r = await ctl(["list"]);
 		if (r.code !== 0) {
 			ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "agency_list failed", "error");
@@ -335,7 +326,7 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 
 	const commandAgencyRelease = async (
 		rawArgs: string,
-		ctx: { ui: { notify: (msg: string, level?: string) => void } },
+		ctx: ExtensionCommandContext,
 	) => {
 		const tokens = (rawArgs || "").trim().split(/\s+/).filter(Boolean);
 		let name: string | undefined;
@@ -420,18 +411,6 @@ export default function multiAgencyExtension(pi: ExtensionAPI) {
 			}
 			ctx.ui.notify("Agency project initialized", "info");
 			ctx.ui.notify(r.stdout.trim().slice(0, 500), "info");
-		},
-	});
-
-	pi.registerCommand("agency-claim", {
-		description: "Claim this cmux surface as the Orchestrator hub",
-		handler: async (_args, ctx) => {
-			const r = await ctl(["claim-orchestrator"]);
-			if (r.code !== 0) {
-				ctx.ui.notify(r.stderr.trim() || r.stdout.trim() || "claim failed", "error");
-				return;
-			}
-			ctx.ui.notify("Orchestrator claimed", "info");
 		},
 	});
 
