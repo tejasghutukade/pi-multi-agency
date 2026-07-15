@@ -1,0 +1,31 @@
+pipelines:
+  implementation:
+    description: Scout, plan, implement, then review a topic
+    onFailure: stop
+    stages:
+      - id: scout
+        role: scout
+        goal: "Scout: {topic}"
+        outputs: [primary]
+        inputs: []
+      - id: plan
+        role: planner
+        goal: "Plan: {topic}"
+        outputs: [primary]
+        inputs:
+          - stage: scout
+            artifacts: [primary]
+      - id: implement
+        role: worker
+        goal: "Implement: {topic}"
+        outputs: [primary]
+        inputs:
+          - stage: plan
+            artifacts: [primary]
+      - id: review
+        role: coderev
+        goal: "Review: {topic}"
+        outputs: [primary]
+        inputs:
+          - stage: implement
+            artifacts: [primary]

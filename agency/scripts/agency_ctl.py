@@ -462,6 +462,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 0
 
     copy_file(kit / "agents.yaml", agency / "agents.yaml")
+    copy_file(kit / "pipelines.yaml", agency / "pipelines.yaml")
     copy_file(kit / "memory-spec.md", agency / "memory-spec.md")
     copy_tree(kit / "charters", agency / "charters")
 
