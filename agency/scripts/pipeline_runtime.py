@@ -478,6 +478,12 @@ class AgencyControlPlane:
             return pipeline_runner.WaitResult("report", claimed, receipt=str(processing))
         return None
 
+    def surface_alive(self, instance: str) -> bool:
+        """Reuse a prior stage instance only when its cmux surface is live."""
+        if not isinstance(instance, str) or not instance:
+            return False
+        return cmux_pane.surface_alive(instance) is True
+
     def ack_stage_report(self, receipt: str) -> None:
         if not isinstance(receipt, str) or not receipt:
             raise PipelineRuntimeError("processing receipt must be a non-empty path")

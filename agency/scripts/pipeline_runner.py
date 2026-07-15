@@ -83,6 +83,10 @@ class ControlPlane(Protocol):
         expected_sender: str,
     ) -> WaitResult | None: ...
 
+    def surface_alive(self, instance: str) -> bool:
+        """True when the prior stage instance's surface is still live (reuse)."""
+        ...
+
     def ack_stage_report(self, receipt: str) -> None:
         """Idempotently acknowledge a processing receipt after durable state."""
         ...
@@ -475,6 +479,136 @@ def _run_pipeline_locked(
         if status == "needs_attention":
             if not resume or not stage.get("assignedInstance") or not stage.get("dispatchedAt"):
                 break
+            action = pipeline_state.classify_resume(stage, lambda _t: False)
+            if action is pipeline_state.ResumeAction.RE_DISPATCH:
+                # Human-in-the-loop (Design B): re-dispatch the SAME stage with the
+                # operator answer injected. Reuse the prior instance if its surface is
+                # still alive; otherwise reserve a fresh one. The stage re-derives
+                # context from its prior summary/artifacts + the answer.
+                answer = stage.get("operatorResponse") or ""
+                prior_summary = stage.get("summary") or ""
+                prior_artifacts = dict(stage.get("artifacts") or {})
+                instance = stage["assignedInstance"]
+                reused = control_plane.surface_alive(instance)
+                if not reused:
+                    try:
+                        reserved = control_plane.reserve_stage_instance(
+                            pipeline_id=pipeline_id,
+                            role=stage["role"],
+                            task_id=stage["taskId"],
+                        )
+                        instance = reserved.instance
+                        if not isinstance(instance, str) or not _IDENTIFIER.fullmatch(instance):
+                            raise PipelineRunnerError("reservation returned an invalid instance identifier")
+                    except Exception as exc:
+                        _attention(agency_root, run, stage, lock_owner, f"Stage reservation failed: {exc}")
+                        break
+                pipeline_state.transition_stage(
+                    agency_root,
+                    pipeline_id,
+                    stage_id,
+                    "dispatched",
+                    lock_owner=lock_owner,
+                    assigned_instance=instance,
+                )
+                if not reused:
+                    try:
+                        control_plane.spawn_stage(
+                            pipeline_id=pipeline_id,
+                            role=stage["role"],
+                            task_id=stage["taskId"],
+                            instance=instance,
+                        )
+                    except Exception as exc:
+                        dispatched = next(
+                            record
+                            for record in pipeline_state.get_run(agency_root, pipeline_id)["stages"]
+                            if record["id"] == stage_id
+                        )
+                        _attention(agency_root, run, dispatched, lock_owner, f"Stage spawn is uncertain: {exc}")
+                        break
+                try:
+                    named_inputs, context_paths = resolve_named_inputs(
+                        project_root=project_root,
+                        stage_definition=stage_definition,
+                        stage_records={r["id"]: r for r in run["stages"]},
+                    )
+                except Exception as exc:
+                    _attention(agency_root, run, stage, lock_owner, f"Input resolution failed: {exc}")
+                    break
+                payload = build_delegate_payload(
+                    pipeline_id=pipeline_id,
+                    topic=run["topic"],
+                    stage_definition=stage_definition,
+                    task_id=stage["taskId"],
+                    named_inputs=named_inputs,
+                    context_paths=context_paths,
+                )
+                payload["operatorResponse"] = answer
+                payload["priorSummary"] = prior_summary
+                payload["priorArtifacts"] = prior_artifacts
+                try:
+                    control_plane.delegate_stage(
+                        pipeline_id=pipeline_id,
+                        instance=instance,
+                        task_id=stage["taskId"],
+                        payload=payload,
+                    )
+                except Exception as exc:
+                    dispatched = next(
+                        record
+                        for record in pipeline_state.get_run(agency_root, pipeline_id)["stages"]
+                        if record["id"] == stage_id
+                    )
+                    _attention(agency_root, run, dispatched, lock_owner, f"Delegate delivery is uncertain: {exc}")
+                    break
+                try:
+                    waited = control_plane.wait_stage(
+                        pipeline_id=pipeline_id,
+                        task_id=stage["taskId"],
+                        expected_sender=instance,
+                        timeout=wait_timeout,
+                    )
+                except Exception as exc:
+                    waited = WaitResult("timeout", detail=f"wait failed: {exc}")
+                if waited.status != "report":
+                    current = next(
+                        record
+                        for record in pipeline_state.get_run(agency_root, pipeline_id)["stages"]
+                        if record["id"] == stage_id
+                    )
+                    detail = waited.detail or f"stage wait ended with {waited.status!r}"
+                    _attention(agency_root, run, current, lock_owner, detail)
+                    break
+                try:
+                    result = validate_stage_report(
+                        envelope=waited.envelope,
+                        expected_task_id=stage["taskId"],
+                        expected_sender=instance,
+                        declared_outputs=stage_definition["outputs"],
+                        project_root=project_root,
+                    )
+                    current = next(
+                        record
+                        for record in pipeline_state.get_run(agency_root, pipeline_id)["stages"]
+                        if record["id"] == stage_id
+                    )
+                    _persist_result(agency_root, run, current, result, lock_owner, reconciled=False)
+                    _ack_persisted_report(control_plane, waited.receipt)
+                except Exception as exc:
+                    current = next(
+                        record
+                        for record in pipeline_state.get_run(agency_root, pipeline_id)["stages"]
+                        if record["id"] == stage_id
+                    )
+                    _attention(agency_root, run, current, lock_owner, f"Invalid stage report: {exc}")
+                    break
+                if result["status"] == "needs_attention":
+                    # Another question: stop and await the next operator answer.
+                    break
+                if result["status"] == "failed" and run["onFailure"] == "stop":
+                    break
+                continue
             try:
                 found = control_plane.find_existing_report(
                     pipeline_id=pipeline_id,

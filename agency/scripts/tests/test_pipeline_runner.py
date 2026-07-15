@@ -96,6 +96,10 @@ class FakeControlPlane:
     def ack_stage_report(self, receipt: str) -> None:
         self.events.append(("ack", receipt))
 
+    def surface_alive(self, instance: str) -> bool:
+        # Default: prior instances are reusable; tests can override.
+        return True
+
 
 def stage_definition(stage_id: str = "only", role: str = "scout") -> dict[str, Any]:
     return {
@@ -598,6 +602,50 @@ def test_late_report_reconciles_dispatched_attention_once(tmp_path: Path):
     assert [event[0] for event in fake.events] == ["find"]
 
 
+def test_resume_re_dispaches_needs_attention_with_operator_answer(tmp_path: Path):
+    definition = stage_definition()
+    agency, project = setup_run(tmp_path, definition)
+    task = f"pl-{PIPELINE_ID}-s1"
+    state.record_dispatched(agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1")
+    state.transition_stage(
+        agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER,
+        error="which way?", summary="scaffolded the module",
+    )
+    # Operator answered; the answer is bound to the exact stage.
+    state.record_operator_response(agency, PIPELINE_ID, "only", "use approach B", lock_owner=OWNER)
+    # The re-dispatched stage eventually succeeds.
+    fake = FakeControlPlane({task: report(task, "scout-t1", {"primary": write_artifact(project, "out.md")})})
+    synthesis = runner.run_pipeline(agency, project, PIPELINE_ID, OWNER, fake, resume=True)
+    assert synthesis["status"] == "succeeded"
+    # Reuse path: no fresh reserve/spawn when the prior surface is alive.
+    dispatch_events = [e for e in fake.events if e[0] in {"reserve", "spawn", "delegate"}]
+    assert dispatch_events == [("delegate", task, "scout-t1")], dispatch_events
+    # The answer was injected into the re-dispatched delegate payload.
+    assert fake.payloads[task]["operatorResponse"] == "use approach B"
+    assert fake.payloads[task]["priorSummary"] == "scaffolded the module"
+
+
+def test_resume_re_dispatch_reuses_instance_when_alive_else_reserves_fresh(tmp_path: Path):
+    definition = stage_definition()
+    agency, project = setup_run(tmp_path, definition)
+    task = f"pl-{PIPELINE_ID}-s1"
+    state.record_dispatched(agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1")
+    state.transition_stage(
+        agency, PIPELINE_ID, "only", "needs_attention", lock_owner=OWNER, error="q"
+    )
+    state.record_operator_response(agency, PIPELINE_ID, "only", "ans", lock_owner=OWNER)
+    # Surface not alive -> reserve + spawn a fresh instance, then delegate.
+    class DeadSurfaceFake(FakeControlPlane):
+        def surface_alive(self, instance: str) -> bool:
+            return False
+    fake = DeadSurfaceFake({task: report(task, "scout-t1", {"primary": write_artifact(project, "out.md")})})
+    synthesis = runner.run_pipeline(agency, project, PIPELINE_ID, OWNER, fake, resume=True)
+    assert synthesis["status"] == "succeeded"
+    dispatch_events = [e[0] for e in fake.events]
+    assert dispatch_events == ["reserve", "spawn", "delegate", "wait"], dispatch_events
+    assert fake.payloads[task]["operatorResponse"] == "ans"
+
+
 def test_dispatched_attention_without_late_report_remains_unchanged(tmp_path: Path):
     definition = stage_definition()
     agency, project = setup_run(tmp_path, definition)
@@ -697,5 +745,5 @@ def test_module_dependency_and_protocol_have_no_retry_surface():
     assert "redelegate" not in runner.ControlPlane.__dict__
     assert set(name for name, value in inspect.getmembers(runner.ControlPlane, inspect.isfunction) if not name.startswith("_")) == {
         "reserve_stage_instance", "spawn_stage", "delegate_stage", "wait_stage", "find_existing_report",
-        "ack_stage_report"
+        "ack_stage_report", "surface_alive"
     }
