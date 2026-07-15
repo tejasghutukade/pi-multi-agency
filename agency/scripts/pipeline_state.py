@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 LOCK_VERSION = 1
 STATE_FILE = "pipelines.json"
 PREVIOUS_STATE_FILE = "pipelines.json.prev"
@@ -303,6 +303,55 @@ def read_lock(root: Path, *, attempts: int = 5) -> dict[str, Any] | None:
     raise PipelineLockCorruption(f"invalid pipeline lock {path}: {last_error}") from last_error
 
 
+def bind_lock_runtime(
+    root: Path,
+    *,
+    pipeline_id: str,
+    owner_id: str,
+    owner_pid: int,
+    owner_surface: str,
+) -> dict[str, Any]:
+    """Durably bind an existing lock owner to its live runtime identity.
+
+    Ownership and the original creation timestamp are immutable.  The updated
+    record is fsynced to a same-directory temporary file and atomically replaces
+    the prior generation, so readers see either complete record.
+    """
+    _validate_identifier(pipeline_id, "pipeline_id")
+    _require_string(owner_id, "owner_id")
+    if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
+        raise PipelineStateValidationError("owner_pid must be a positive integer")
+    _require_string(owner_surface, "owner_surface")
+    current = _assert_lock(root, pipeline_id, owner_id)
+    record = _validate_lock_record(
+        {
+            **current,
+            "ownerPid": owner_pid,
+            "ownerSurface": owner_surface,
+        }
+    )
+    if record == current:
+        return copy.deepcopy(record)
+
+    payload = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode()
+    tmp = root / f".{LOCK_FILE}.{secrets.token_hex(6)}.tmp"
+    _write_exclusive(tmp, payload)
+    try:
+        # Re-check immediately before replacement.  This prevents a caller from
+        # overwriting a different owner discovered while preparing the record.
+        latest = _assert_lock(root, pipeline_id, owner_id)
+        if latest.get("createdAt") != current.get("createdAt"):
+            raise PipelineLockOwnershipError("pipeline lock changed before runtime binding")
+        os.replace(tmp, _lock_path(root))
+        _fsync_directory(root)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    return copy.deepcopy(record)
+
+
 def release_lock(root: Path, *, owner_id: str, pipeline_id: str | None = None) -> None:
     """Release only when the durable record still belongs to the caller."""
     current = read_lock(root)
@@ -477,6 +526,7 @@ def _validate_run(run: Any, context: str) -> dict[str, Any]:
         "runnerInstance",
         "runnerSurface",
         "finalTaskId",
+        "finalDelivery",
         "createdAt",
         "updatedAt",
         "completedAt",
@@ -502,6 +552,35 @@ def _validate_run(run: Any, context: str) -> dict[str, Any]:
     if final_task_id != expected_final_task_id:
         raise PipelineStateValidationError(
             f"{context}.finalTaskId must be stable value {expected_final_task_id!r}"
+        )
+    final_delivery = run.get("finalDelivery")
+    if not isinstance(final_delivery, dict) or set(final_delivery) != {
+        "messageId",
+        "publishedAt",
+        "cleanupStartedAt",
+    }:
+        raise PipelineStateValidationError(
+            f"{context}.finalDelivery has missing or unsupported fields"
+        )
+    expected_message_id = f"pipe-final-{run['pipelineId']}"
+    if final_delivery.get("messageId") != expected_message_id:
+        raise PipelineStateValidationError(
+            f"{context}.finalDelivery.messageId must be {expected_message_id!r}"
+        )
+    _require_optional_string(final_delivery.get("publishedAt"), f"{context}.finalDelivery.publishedAt")
+    _require_optional_string(
+        final_delivery.get("cleanupStartedAt"),
+        f"{context}.finalDelivery.cleanupStartedAt",
+    )
+    if final_delivery.get("cleanupStartedAt") is not None and final_delivery.get("publishedAt") is None:
+        raise PipelineStateValidationError(
+            f"{context}.finalDelivery cleanup cannot start before publication"
+        )
+    if run.get("status") in ACTIVE_RUN_STATUSES and any(
+        final_delivery.get(field) is not None for field in ("publishedAt", "cleanupStartedAt")
+    ):
+        raise PipelineStateValidationError(
+            f"{context}: active run cannot have final delivery progress"
         )
     _require_string(run.get("createdAt"), f"{context}.createdAt")
     _require_string(run.get("updatedAt"), f"{context}.updatedAt")
@@ -771,6 +850,11 @@ def create_run(
         "runnerInstance": runner_instance,
         "runnerSurface": runner_surface,
         "finalTaskId": f"pipe-done-{pipeline_id}",
+        "finalDelivery": {
+            "messageId": f"pipe-final-{pipeline_id}",
+            "publishedAt": None,
+            "cleanupStartedAt": None,
+        },
         "createdAt": timestamp,
         "updatedAt": timestamp,
         "completedAt": None,
@@ -804,6 +888,48 @@ def get_active_run(root: Path) -> dict[str, Any] | None:
     data = load_state(root)
     pipeline_id = data["activePipelineId"]
     return None if pipeline_id is None else copy.deepcopy(_run_from_data(data, pipeline_id))
+
+
+def mark_final_published(
+    root: Path,
+    pipeline_id: str,
+    *,
+    lock_owner: str,
+) -> dict[str, Any]:
+    """Durably record publication of the stable terminal final envelope."""
+    _assert_lock(root, pipeline_id, lock_owner)
+    data = load_state(root)
+    run = _run_from_data(data, pipeline_id)
+    if run.get("status") not in {"succeeded", "failed"}:
+        raise PipelineStateValidationError("final publication requires a terminal run")
+    delivery = run["finalDelivery"]
+    if delivery["publishedAt"] is None:
+        delivery["publishedAt"] = _now()
+        run["updatedAt"] = delivery["publishedAt"]
+        save_state(root, data)
+    return copy.deepcopy(delivery)
+
+
+def mark_final_cleanup_started(
+    root: Path,
+    pipeline_id: str,
+    *,
+    lock_owner: str,
+) -> dict[str, Any]:
+    """Durably record owner-authorized terminal cleanup intent."""
+    _assert_lock(root, pipeline_id, lock_owner)
+    data = load_state(root)
+    run = _run_from_data(data, pipeline_id)
+    if run.get("status") not in {"succeeded", "failed"}:
+        raise PipelineStateValidationError("final cleanup requires a terminal run")
+    delivery = run["finalDelivery"]
+    if delivery["publishedAt"] is None:
+        raise PipelineStateValidationError("final cleanup requires published delivery")
+    if delivery["cleanupStartedAt"] is None:
+        delivery["cleanupStartedAt"] = _now()
+        run["updatedAt"] = delivery["cleanupStartedAt"]
+        save_state(root, data)
+    return copy.deepcopy(delivery)
 
 
 def bind_runner(

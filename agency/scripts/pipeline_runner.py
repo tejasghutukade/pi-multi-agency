@@ -43,6 +43,7 @@ class WaitResult:
     status: Literal["report", "timeout", "pane_dead"]
     envelope: Mapping[str, Any] | None = None
     detail: str | None = None
+    receipt: str | None = None
 
 
 class ControlPlane(Protocol):
@@ -80,7 +81,11 @@ class ControlPlane(Protocol):
         pipeline_id: str,
         task_id: str,
         expected_sender: str,
-    ) -> Mapping[str, Any] | None: ...
+    ) -> WaitResult | None: ...
+
+    def ack_stage_report(self, receipt: str) -> None:
+        """Idempotently acknowledge a processing receipt after durable state."""
+        ...
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -341,6 +346,31 @@ def _persist_result(
         )
 
 
+def _received_report(value: WaitResult | Mapping[str, Any]) -> tuple[Mapping[str, Any], str | None]:
+    """Normalize concrete receipt results while retaining older in-memory fakes."""
+    if isinstance(value, WaitResult):
+        if value.status != "report" or value.envelope is None:
+            raise InvalidStageReport("report lookup did not return a report envelope")
+        return value.envelope, value.receipt
+    if isinstance(value, Mapping):
+        return value, None
+    raise InvalidStageReport("report lookup returned an invalid result")
+
+
+def _ack_persisted_report(control_plane: ControlPlane, receipt: str | None) -> None:
+    """Best-effort ack only after the stage result is durably committed.
+
+    A failed ack leaves a recoverable processing receipt.  It must not turn
+    already-persisted work into execution uncertainty or trigger a retry.
+    """
+    if receipt is None:
+        return
+    try:
+        control_plane.ack_stage_report(receipt)
+    except Exception:
+        pass
+
+
 def synthesize_run(run: Mapping[str, Any]) -> dict[str, Any]:
     """Return stable durable state only; this function performs no delivery."""
     stages = [
@@ -422,13 +452,14 @@ def _run_pipeline_locked(
             if not resume or not stage.get("assignedInstance") or not stage.get("dispatchedAt"):
                 break
             try:
-                envelope = control_plane.find_existing_report(
+                found = control_plane.find_existing_report(
                     pipeline_id=pipeline_id,
                     task_id=stage["taskId"],
                     expected_sender=stage["assignedInstance"],
                 )
-                if envelope is None:
+                if found is None:
                     break
+                envelope, receipt = _received_report(found)
                 result = validate_stage_report(
                     envelope=envelope,
                     expected_task_id=stage["taskId"],
@@ -437,6 +468,7 @@ def _run_pipeline_locked(
                     project_root=project_root,
                 )
                 _persist_result(agency_root, run, stage, result, lock_owner, reconciled=True)
+                _ack_persisted_report(control_plane, receipt)
             except Exception:
                 break
             if result["status"] == "failed" and run["onFailure"] == "stop":
@@ -453,7 +485,7 @@ def _run_pipeline_locked(
                 )
                 break
             try:
-                envelope = control_plane.find_existing_report(
+                found = control_plane.find_existing_report(
                     pipeline_id=pipeline_id,
                     task_id=stage["taskId"],
                     expected_sender=stage["assignedInstance"],
@@ -461,7 +493,7 @@ def _run_pipeline_locked(
             except Exception as exc:
                 _attention(agency_root, run, stage, lock_owner, f"Report reconciliation failed: {exc}")
                 break
-            if envelope is None:
+            if found is None:
                 _attention(
                     agency_root,
                     run,
@@ -471,6 +503,7 @@ def _run_pipeline_locked(
                 )
                 break
             try:
+                envelope, receipt = _received_report(found)
                 result = validate_stage_report(
                     envelope=envelope,
                     expected_task_id=stage["taskId"],
@@ -479,6 +512,7 @@ def _run_pipeline_locked(
                     project_root=project_root,
                 )
                 _persist_result(agency_root, run, stage, result, lock_owner, reconciled=True)
+                _ack_persisted_report(control_plane, receipt)
             except Exception as exc:
                 _attention(agency_root, run, stage, lock_owner, f"Invalid reconciled report: {exc}")
                 break
@@ -596,6 +630,7 @@ def _run_pipeline_locked(
                 if record["id"] == stage_id
             )
             _persist_result(agency_root, run, current, result, lock_owner, reconciled=False)
+            _ack_persisted_report(control_plane, waited.receipt)
         except Exception as exc:
             current = next(
                 record

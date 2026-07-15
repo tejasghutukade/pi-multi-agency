@@ -365,12 +365,13 @@ def require_pipeline_runner_authority(root: Path, pipeline_id: str) -> dict[str,
     return runner
 
 
-def require_active_pending_stage_role(
+def require_active_dispatched_stage_spawn(
     root: Path,
     pipeline_id: str,
     role: str,
+    instance: str,
 ) -> dict[str, Any]:
-    """Require spawn to target the current pending stage's configured role."""
+    """Require spawn to effect the current stage's exact durable reservation."""
     run = pipeline_state.get_active_run(root)
     if run is None or run.get("pipelineId") != pipeline_id:
         raise RuntimeError(f"pipeline spawn denied: pipeline {pipeline_id!r} is not active")
@@ -381,15 +382,20 @@ def require_active_pending_stage_role(
     )
     if stage is None:
         raise RuntimeError("pipeline spawn denied: active pipeline has no current stage")
-    if stage.get("status") != "pending":
+    if stage.get("status") != "dispatched":
         raise RuntimeError(
-            "pipeline spawn denied: current stage is not pending: "
+            "pipeline spawn denied: current stage is not dispatched: "
             f"{stage.get('status')!r}"
         )
     if stage.get("role") != role:
         raise RuntimeError(
             "pipeline spawn denied: role does not match current stage: "
             f"expected {stage.get('role')!r}, got {role!r}"
+        )
+    if stage.get("assignedInstance") != instance:
+        raise RuntimeError(
+            "pipeline spawn denied: name does not match dispatched reservation: "
+            f"expected {stage.get('assignedInstance')!r}, got {instance!r}"
         )
     return stage
 
@@ -496,7 +502,7 @@ def cmd_spawn(args: argparse.Namespace) -> int:
 def cmd_delegate(args: argparse.Namespace) -> int:
     root = agency_root()
     pipeline_id = getattr(args, "pipeline_id", None)
-    require_operation_authority(
+    authority = require_operation_authority(
         root,
         pipeline_id=pipeline_id,
         recovery=bool(getattr(args, "recovery", False)),
@@ -567,10 +573,16 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     inst["updatedAt"] = now
     save_sessions(root, data)
 
+    sender_name = HUB
+    if pipeline_id is not None:
+        candidate = None if authority is None else authority.get("intercomName")
+        if not isinstance(candidate, str) or not candidate:
+            raise RuntimeError("pipeline delegate sender identity is missing")
+        sender_name = candidate
     bus_args = [
         "send",
         "--from",
-        HUB,
+        sender_name,
         "--to",
         args.to,
         "--type",
@@ -582,6 +594,8 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     ]
     if args.workflow_id:
         bus_args.extend(["--workflow-id", args.workflow_id])
+    if pipeline_id is not None or inst.get("role") == "pipeline-runner":
+        bus_args.append("--require-caller")
     if getattr(args, "no_bus", False):
         result = {
             "ok": True,
@@ -784,6 +798,19 @@ def cmd_claim_orchestrator(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pipeline_runner_serve(args: argparse.Namespace) -> int:
+    # Keep ordinary ctl startup independent of the concrete runtime dependency.
+    from pipeline_runtime import serve_pipeline_runner
+
+    result = serve_pipeline_runner(
+        args.instance,
+        resume=bool(args.resume),
+        wait_timeout=float(args.wait_timeout),
+    )
+    print(json.dumps({"ok": True, "action": "pipeline-runner-serve", "result": result}, indent=2))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="agency_ctl", description="Multi-Agency Option C control plane")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -855,6 +882,13 @@ def main() -> int:
 
     sub.add_parser("claim-orchestrator", help="Bind this cmux surface as orchestrator")
 
+    pr = sub.add_parser("pipeline-runner", help="Fixed declarative pipeline runtime")
+    pr_sub = pr.add_subparsers(dest="pipeline_runner_cmd", required=True)
+    prs = pr_sub.add_parser("serve", help="Claim and drive a precreated pipeline run")
+    prs.add_argument("--instance", required=True)
+    prs.add_argument("--resume", action="store_true")
+    prs.add_argument("--wait-timeout", type=float, default=120.0)
+
     ini = sub.add_parser("init", help="Scaffold .pi/agency + .pi/agents in a project from this package")
     ini.add_argument("--project", help="Project root (default: cwd)")
     ini.add_argument("--force", action="store_true", help="Refresh templates even if already initialized")
@@ -898,6 +932,10 @@ def main() -> int:
             return cmd_release(args)
         if args.cmd == "claim-orchestrator":
             return cmd_claim_orchestrator(args)
+        if args.cmd == "pipeline-runner":
+            if args.pipeline_runner_cmd != "serve":
+                raise RuntimeError(f"unknown pipeline-runner command {args.pipeline_runner_cmd}")
+            return cmd_pipeline_runner_serve(args)
         if args.cmd == "lifecycle":
             fwd = list(args.lifecycle_args or [])
             if fwd and fwd[0] == "--":

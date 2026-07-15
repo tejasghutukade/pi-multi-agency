@@ -93,6 +93,9 @@ class FakeControlPlane:
         self.events.append(("find", task_id, expected_sender))
         return self.reports.get(task_id)
 
+    def ack_stage_report(self, receipt: str) -> None:
+        self.events.append(("ack", receipt))
+
 
 def stage_definition(stage_id: str = "only", role: str = "scout") -> dict[str, Any]:
     return {
@@ -613,6 +616,77 @@ def test_normal_invocation_never_retries_dispatched_work(tmp_path: Path):
     assert not fake.events
 
 
+def test_report_is_persisted_before_ack_and_ack_failure_does_not_reexecute(
+    tmp_path: Path, monkeypatch
+):
+    agency, project = setup_run(tmp_path, stage_definition())
+    task = f"pl-{PIPELINE_ID}-s1"
+    events = []
+
+    class ReceiptFake(FakeControlPlane):
+        def wait_stage(self, **kwargs):
+            self.events.append(("wait", kwargs["task_id"], kwargs["expected_sender"]))
+            return runner.WaitResult(
+                "report", self.reports[kwargs["task_id"]], receipt="processing/report.json"
+            )
+
+        def ack_stage_report(self, receipt: str) -> None:
+            events.append(("ack", receipt))
+            raise OSError("ack crash")
+
+    real_transition = state.transition_stage
+
+    def tracked_transition(*args, **kwargs):
+        result = real_transition(*args, **kwargs)
+        if kwargs.get("summary"):
+            events.append(("persist", result["status"]))
+        return result
+
+    monkeypatch.setattr(state, "transition_stage", tracked_transition)
+    fake = ReceiptFake(
+        {task: report(task, "scout-t1", {"primary": write_artifact(project, "out.md")})}
+    )
+    assert runner.run_pipeline(agency, project, PIPELINE_ID, OWNER, fake)["status"] == "succeeded"
+    assert events == [("persist", "succeeded"), ("ack", "processing/report.json")]
+    assert [event[0] for event in fake.events].count("spawn") == 1
+
+
+def test_resume_report_is_persisted_before_processing_ack(tmp_path: Path, monkeypatch):
+    agency, project = setup_run(tmp_path, stage_definition())
+    task = f"pl-{PIPELINE_ID}-s1"
+    state.record_dispatched(
+        agency, PIPELINE_ID, "only", lock_owner=OWNER, assigned_instance="scout-t1"
+    )
+    events = []
+
+    class ResumeReceiptFake(FakeControlPlane):
+        def find_existing_report(self, **kwargs):
+            self.find_calls += 1
+            return runner.WaitResult(
+                "report", self.reports[kwargs["task_id"]], receipt="processing/late.json"
+            )
+
+        def ack_stage_report(self, receipt: str) -> None:
+            events.append(("ack", receipt))
+
+    real_reconcile = state.record_reconciled_result
+
+    def tracked_reconcile(*args, **kwargs):
+        result = real_reconcile(*args, **kwargs)
+        events.append(("persist", result["status"]))
+        return result
+
+    monkeypatch.setattr(state, "record_reconciled_result", tracked_reconcile)
+    fake = ResumeReceiptFake(
+        {task: report(task, "scout-t1", {"primary": write_artifact(project, "late.md")})}
+    )
+    assert runner.run_pipeline(
+        agency, project, PIPELINE_ID, OWNER, fake, resume=True
+    )["status"] == "succeeded"
+    assert events == [("persist", "succeeded"), ("ack", "processing/late.json")]
+    assert all(event[0] not in {"spawn", "delegate"} for event in fake.events)
+
+
 def test_module_dependency_and_protocol_have_no_retry_surface():
     source = Path(runner.__file__).read_text()
     for forbidden in ("agency_ctl", "agent_spawn", "cmux", "subprocess"):
@@ -620,5 +694,6 @@ def test_module_dependency_and_protocol_have_no_retry_surface():
     assert "retry" not in runner.ControlPlane.__dict__
     assert "redelegate" not in runner.ControlPlane.__dict__
     assert set(name for name, value in inspect.getmembers(runner.ControlPlane, inspect.isfunction) if not name.startswith("_")) == {
-        "reserve_stage_instance", "spawn_stage", "delegate_stage", "wait_stage", "find_existing_report"
+        "reserve_stage_instance", "spawn_stage", "delegate_stage", "wait_stage", "find_existing_report",
+        "ack_stage_report"
     }

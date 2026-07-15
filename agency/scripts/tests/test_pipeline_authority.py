@@ -277,11 +277,24 @@ def _dispatch_current(root: Path, target: str = "scout-t1") -> str:
     return task_id
 
 
-def test_spawn_role_is_scoped_to_current_pending_stage(authorized: Path):
-    stage = ctl.require_active_pending_stage_role(authorized, PIPELINE_ID, "scout")
+def test_spawn_requires_current_dispatched_role_and_exact_reservation(authorized: Path):
+    with pytest.raises(RuntimeError, match="not dispatched"):
+        ctl.require_active_dispatched_stage_spawn(
+            authorized, PIPELINE_ID, "scout", "scout-t1"
+        )
+    _dispatch_current(authorized, "scout-t1")
+    stage = ctl.require_active_dispatched_stage_spawn(
+        authorized, PIPELINE_ID, "scout", "scout-t1"
+    )
     assert stage["id"] == "scout"
     with pytest.raises(RuntimeError, match="role does not match current stage"):
-        ctl.require_active_pending_stage_role(authorized, PIPELINE_ID, "worker")
+        ctl.require_active_dispatched_stage_spawn(
+            authorized, PIPELINE_ID, "worker", "scout-t1"
+        )
+    with pytest.raises(RuntimeError, match="name does not match"):
+        ctl.require_active_dispatched_stage_spawn(
+            authorized, PIPELINE_ID, "scout", "scout-t2"
+        )
 
 
 def test_dispatched_stage_requires_exact_current_task_and_target(authorized: Path):
@@ -338,6 +351,34 @@ def test_delegate_and_wait_use_exact_dispatched_ownership(authorized: Path, monk
     assert ctl.cmd_wait(wait) == 0
     assert "--from" in bus_calls[0]
     assert bus_calls[0][bus_calls[0].index("--from") + 1] == "scout-t1"
+    capsys.readouterr()
+
+
+def test_pipeline_delegate_requires_authenticated_bus_sender(
+    authorized: Path, monkeypatch, capsys
+):
+    task_id = _dispatch_current(authorized)
+    monkeypatch.setattr(ctl, "agency_root", lambda: authorized)
+    monkeypatch.setattr(ctl, "load_agents", lambda root: {"agents": {"scout": {}}})
+    calls = []
+    monkeypatch.setattr(
+        ctl,
+        "bus_run",
+        lambda root, args: calls.append(args) or {"ok": True},
+    )
+    args = Namespace(
+        pipeline_id=PIPELINE_ID,
+        recovery=False,
+        to="scout-t1",
+        task_id=task_id,
+        workflow_id=None,
+        payload_json='{"goal":"x"}',
+        prepare_only=False,
+        no_bus=False,
+    )
+    assert ctl.cmd_delegate(args) == 0
+    assert "--require-caller" in calls[0]
+    assert calls[0][calls[0].index("--from") + 1] == RUNNER
     capsys.readouterr()
 
 

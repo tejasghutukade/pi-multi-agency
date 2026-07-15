@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,8 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from agency_paths import agency_root as paths_agency_root  # noqa: E402
 from catalog import load_agents, role_of  # noqa: E402
 from catalog import HUB as CATALOG_HUB  # noqa: E402
+from cmux_pane import caller_surface, surface_alive  # noqa: E402
+from ledger import load_sessions  # noqa: E402
 
 TYPES = ("delegate", "report", "ask", "reply", "progress", "release")
 HUB = "orchestrator"
@@ -51,7 +54,7 @@ def short_id() -> str:
 
 def ensure_inbox(root: Path, name: str) -> Path:
     base = root / "inbox" / name
-    for sub in ("pending", "processing", "done"):
+    for sub in ("pending", "processing", "done", "rejected"):
         (base / sub).mkdir(parents=True, exist_ok=True)
     (root / "outbox").mkdir(parents=True, exist_ok=True)
     return base
@@ -105,17 +108,108 @@ def set_notify(fn) -> None:
     _notify = fn if fn is not None else _default_cmux_notify
 
 
+def _authenticated_sender(root: Path, from_name: str) -> dict[str, str]:
+    surface, _pane = caller_surface()
+    rows = [
+        row
+        for row in (load_sessions(root).get("instances") or [])
+        if row.get("cmuxSurface") == surface
+    ]
+    if len(rows) != 1:
+        raise RuntimeError(
+            f"sender authentication denied: caller surface {surface!r} maps to {len(rows)} rows"
+        )
+    row = rows[0]
+    if row.get("intercomName") != from_name:
+        raise RuntimeError(
+            f"sender authentication denied: caller is {row.get('intercomName')!r}, not {from_name!r}"
+        )
+    if surface_alive(surface) is not True:
+        raise RuntimeError("sender authentication denied: caller surface is not confirmed alive")
+    instance_id = row.get("instanceId")
+    if not isinstance(instance_id, str) or not instance_id:
+        raise RuntimeError("sender authentication denied: session instanceId is missing")
+    return {"instanceId": instance_id, "intercomName": from_name, "surface": surface}
+
+
+def _message_locations(root: Path, recipient: str, message_id: str) -> list[Path]:
+    ensure_inbox(root, recipient)
+    found: list[Path] = []
+    inbox_root = root / "inbox"
+    for inbox in sorted(path for path in inbox_root.iterdir() if path.is_dir()):
+        for state in ("pending", "processing", "done"):
+            for path in sorted((inbox / state).glob("*.json")):
+                try:
+                    envelope = json.loads(path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(envelope, dict) and envelope.get("id") == message_id:
+                    found.append(path)
+    outbox = root / "outbox" / f"{message_id}.json"
+    if outbox.is_file():
+        found.append(outbox)
+    return found
+
+
+def _immutable_envelope(envelope: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in envelope.items() if key != "createdAt"}
+
+
+def _write_pending_envelope(root: Path, envelope: dict[str, Any]) -> Path:
+    recipient = envelope["to"]
+    pending = ensure_inbox(root, recipient) / "pending"
+    created = datetime.fromisoformat(envelope["createdAt"].replace("Z", "+00:00"))
+    fname = f"{compact_ts(created)}-{envelope['id']}-{envelope['type']}.json"
+    tmp = pending / f".{fname}.tmp"
+    final = pending / fname
+    tmp.write_text(json.dumps(envelope, indent=2) + "\n")
+    tmp.replace(final)
+    return final
+
+
 def cmd_send(args: argparse.Namespace) -> int:
     root = agency_root()
     if args.type not in TYPES:
         print(f"error: type must be one of {TYPES}", file=sys.stderr)
         return 2
-    if not acl_allows(root, args.from_name, args.to, phase1_hub_only=not args.allow_peers):
+    sender_auth = None
+    if bool(getattr(args, "require_caller", False)):
+        try:
+            sender_auth = _authenticated_sender(root, args.from_name)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 4
+
+    acl_allowed = acl_allows(
+        root,
+        args.from_name,
+        args.to,
+        phase1_hub_only=not getattr(args, "allow_peers", False),
+    )
+    if not acl_allowed and sender_auth is not None:
+        sender_row = next(
+            (
+                row
+                for row in (load_sessions(root).get("instances") or [])
+                if row.get("instanceId") == sender_auth["instanceId"]
+            ),
+            None,
+        )
+        acl_allowed = bool(sender_row and sender_row.get("role") == "pipeline-runner")
+    if not acl_allowed:
         print(
             f"error: ACL denied {args.from_name} → {args.to} (Phase 1 hub-only unless --allow-peers)",
             file=sys.stderr,
         )
         return 3
+
+    requested_id = getattr(args, "message_id", None)
+    if requested_id is not None and (
+        not isinstance(requested_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", requested_id)
+    ):
+        print("error: message id must be a safe identifier", file=sys.stderr)
+        return 2
 
     payload: Any = None
     payload_path = args.payload_path
@@ -138,7 +232,7 @@ def cmd_send(args: argparse.Namespace) -> int:
             payload = json.loads(text)
 
     now = utc_now()
-    msg_id = short_id()
+    msg_id = requested_id or short_id()
     notify_title = args.notify_title or args.to
     notify_body = args.notify_body or f"{args.type} {args.task_id or msg_id}"
     env = {
@@ -163,15 +257,48 @@ def cmd_send(args: argparse.Namespace) -> int:
         "payload": payload,
         "payloadPath": payload_path,
     }
+    if sender_auth is not None:
+        env["senderAuth"] = sender_auth
 
-    ensure_inbox(root, args.to)
-    pending = root / "inbox" / args.to / "pending"
-    fname = f"{compact_ts(now)}-{msg_id}-{args.type}.json"
-    tmp = pending / f".{fname}.tmp"
-    final = pending / fname
-    tmp.write_text(json.dumps(env, indent=2) + "\n")
-    tmp.replace(final)
+    locations = _message_locations(root, args.to, msg_id) if requested_id else []
+    if locations:
+        existing: dict[str, Any] | None = None
+        for location in locations:
+            try:
+                candidate = json.loads(location.read_text())
+            except (OSError, json.JSONDecodeError):
+                print(f"error: existing message {msg_id!r} is unreadable", file=sys.stderr)
+                return 5
+            if not isinstance(candidate, dict):
+                print(f"error: existing message {msg_id!r} is invalid", file=sys.stderr)
+                return 5
+            if existing is None:
+                existing = candidate
+            elif candidate != existing:
+                print(f"error: conflicting durable copies for message {msg_id!r}", file=sys.stderr)
+                return 5
+        assert existing is not None
+        env["createdAt"] = existing.get("createdAt")
+        if _immutable_envelope(existing) != _immutable_envelope(env):
+            print(f"error: message id {msg_id!r} conflicts with existing envelope", file=sys.stderr)
+            return 5
+        inbox_locations = [path for path in locations if path.parent.name in {"pending", "processing", "done"}]
+        out = root / "outbox" / f"{msg_id}.json"
+        if not inbox_locations:
+            final = _write_pending_envelope(root, existing)
+        else:
+            final = inbox_locations[0]
+        if not out.is_file():
+            out.write_text(json.dumps(existing, indent=2) + "\n")
+        print(
+            json.dumps(
+                {"ok": True, "id": msg_id, "path": str(final), "notified": False, "replay": True},
+                indent=2,
+            )
+        )
+        return 0
 
+    final = _write_pending_envelope(root, env)
     out = root / "outbox" / f"{msg_id}.json"
     out.write_text(json.dumps(env, indent=2) + "\n")
 
@@ -285,6 +412,9 @@ def cmd_wait(args: argparse.Namespace) -> int:
             except (OSError, json.JSONDecodeError):
                 continue
             if peek.get("taskId") != args.task_id:
+                continue
+            expected_type = getattr(args, "type", None)
+            if expected_type is not None and peek.get("type") != expected_type:
                 continue
             expected_sender = getattr(args, "from_name", None)
             if expected_sender is not None and peek.get("from") != expected_sender:
@@ -408,6 +538,8 @@ def main() -> int:
     s.add_argument("--notify-body")
     s.add_argument("--no-notify", action="store_true")
     s.add_argument("--allow-peers", action="store_true", help="Allow specialist↔specialist (Phase 2+)")
+    s.add_argument("--require-caller", action="store_true", help="Authenticate --from against the live caller surface")
+    s.add_argument("--message-id", help="Validated stable id for idempotent durable delivery")
     s.set_defaults(func=cmd_send)
 
     r = sub.add_parser("recv", help="Claim oldest pending → processing")
@@ -420,6 +552,7 @@ def main() -> int:
     w.add_argument("--as", dest="as_name", required=True)
     w.add_argument("--task-id", required=True)
     w.add_argument("--from", dest="from_name", help="Match only envelopes from this sender")
+    w.add_argument("--type", choices=TYPES, help="Match only this exact envelope type")
     w.add_argument("--timeout", type=float, default=120.0)
     w.add_argument("--interval", type=float, default=2.0)
     w.add_argument(

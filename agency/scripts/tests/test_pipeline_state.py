@@ -50,8 +50,8 @@ def create(tmp_path: Path, *, pipeline_id: str = "p-123", owner_id: str = "owner
 
 
 def test_state_version_is_bumped_without_silent_migration(tmp_path: Path):
-    assert state.STATE_VERSION == 2
-    assert state.empty_state()["version"] == 2
+    assert state.STATE_VERSION == 3
+    assert state.empty_state()["version"] == 3
     (tmp_path / "pipelines.json").write_text(
         json.dumps({"version": 1, "activePipelineId": None, "runs": []})
     )
@@ -82,6 +82,52 @@ def test_lock_is_exclusive_durable_and_release_is_owner_checked(tmp_path: Path):
     assert state.read_lock(tmp_path) is not None
     state.release_lock(tmp_path, owner_id="owner-1", pipeline_id="p-123")
     assert state.read_lock(tmp_path) is None
+
+
+def test_bind_lock_runtime_is_owner_checked_atomic_and_preserves_creation(tmp_path: Path):
+    acquire(tmp_path)
+    before = state.read_lock(tmp_path)
+    assert before is not None
+
+    bound = state.bind_lock_runtime(
+        tmp_path,
+        pipeline_id="p-123",
+        owner_id="owner-1",
+        owner_pid=9876,
+        owner_surface="surface:live",
+    )
+    assert bound == {
+        **before,
+        "ownerPid": 9876,
+        "ownerSurface": "surface:live",
+    }
+    assert state.read_lock(tmp_path) == bound
+    assert state.bind_lock_runtime(
+        tmp_path,
+        pipeline_id="p-123",
+        owner_id="owner-1",
+        owner_pid=9876,
+        owner_surface="surface:live",
+    ) == bound
+    assert not list(tmp_path.glob(".pipelines.lock.*.tmp"))
+
+    with pytest.raises(state.PipelineLockOwnershipError):
+        state.bind_lock_runtime(
+            tmp_path,
+            pipeline_id="p-123",
+            owner_id="wrong",
+            owner_pid=1,
+            owner_surface="surface:wrong",
+        )
+    with pytest.raises(state.PipelineLockOwnershipError):
+        state.bind_lock_runtime(
+            tmp_path,
+            pipeline_id="p-other",
+            owner_id="owner-1",
+            owner_pid=1,
+            owner_surface="surface:wrong",
+        )
+    assert state.read_lock(tmp_path) == bound
 
 
 def test_concurrent_lock_contenders_have_exactly_one_owner(tmp_path: Path):
@@ -224,6 +270,45 @@ def test_final_task_id_is_stable_and_validated(tmp_path: Path):
     with pytest.raises(state.PipelineStateValidationError, match="finalTaskId must be stable"):
         state.save_state(tmp_path, data)
     assert state.get_run(tmp_path, "p-123")["finalTaskId"] == "pipe-done-p-123"
+
+
+def test_terminal_final_delivery_progress_is_stable_owner_checked_and_idempotent(
+    tmp_path: Path
+):
+    create(tmp_path)
+    state.record_dispatched(
+        tmp_path, "p-123", "scout", lock_owner="owner-1", assigned_instance="scout-t1"
+    )
+    state.transition_stage(
+        tmp_path,
+        "p-123",
+        "scout",
+        "failed",
+        lock_owner="owner-1",
+        error="failed",
+    )
+    run = state.get_run(tmp_path, "p-123")
+    assert run["finalDelivery"] == {
+        "messageId": "pipe-final-p-123",
+        "publishedAt": None,
+        "cleanupStartedAt": None,
+    }
+    with pytest.raises(state.PipelineLockOwnershipError):
+        state.mark_final_published(tmp_path, "p-123", lock_owner="wrong")
+    published = state.mark_final_published(
+        tmp_path, "p-123", lock_owner="owner-1"
+    )
+    assert published["publishedAt"]
+    assert state.mark_final_published(
+        tmp_path, "p-123", lock_owner="owner-1"
+    ) == published
+    cleanup = state.mark_final_cleanup_started(
+        tmp_path, "p-123", lock_owner="owner-1"
+    )
+    assert cleanup["cleanupStartedAt"]
+    assert state.mark_final_cleanup_started(
+        tmp_path, "p-123", lock_owner="owner-1"
+    ) == cleanup
 
 
 def test_create_requires_matching_lock_and_only_one_active_run(tmp_path: Path):
@@ -662,6 +747,11 @@ def _valid_terminal_run(pipeline_id: str) -> dict:
         "runnerInstance": None,
         "runnerSurface": None,
         "finalTaskId": f"pipe-done-{pipeline_id}",
+        "finalDelivery": {
+            "messageId": f"pipe-final-{pipeline_id}",
+            "publishedAt": None,
+            "cleanupStartedAt": None,
+        },
         "createdAt": timestamp,
         "updatedAt": timestamp,
         "completedAt": timestamp,

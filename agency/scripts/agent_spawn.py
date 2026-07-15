@@ -65,7 +65,6 @@ def build_pipeline_runner_command(
 
     process = shlex.join(
         [
-            "exec",
             "env",
             f"AGENCY_ROOT={os.fspath(root)}",
             f"AGENCY_PROJECT_ROOT={os.fspath(project)}",
@@ -137,7 +136,11 @@ def spawn_specialist(
     root = agency_root()
     ctl.require_operation_authority(root, pipeline_id=pipeline_id, recovery=recovery)
     if pipeline_id is not None:
-        ctl.require_active_pending_stage_role(root, pipeline_id, role)
+        if not name:
+            raise RuntimeError("pipeline spawn denied: explicit --name is required")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+            raise RuntimeError("pipeline spawn denied: name must be a safe identifier")
+        ctl.require_active_dispatched_stage_spawn(root, pipeline_id, role, name)
     try:
         ctl.reconcile_cmux(root)
     except Exception:
@@ -152,9 +155,18 @@ def spawn_specialist(
     max_panes = max_specialist_panes(agents)
 
     if reuse:
-        idle = find_idle_role(data, role)
-        if idle:
-            return {"ok": True, "action": "reuse", "instance": idle}
+        if pipeline_id is not None:
+            exact = find_instance(data, name)
+            if exact is not None:
+                if exact.get("role") != role or exact.get("status") != "idle":
+                    raise RuntimeError(
+                        f"reserved instance {name!r} is not an idle {role!r} instance"
+                    )
+                return {"ok": True, "action": "reuse", "instance": exact}
+        else:
+            idle = find_idle_role(data, role)
+            if idle:
+                return {"ok": True, "action": "reuse", "instance": idle}
 
     if specialist_count(data) >= max_panes:
         raise RuntimeError(f"max specialist panes reached ({max_panes})")
@@ -174,7 +186,12 @@ def spawn_specialist(
         if working_rows:
             raise RuntimeError("Worker already working — queue; do not spawn a second Worker")
 
-    resolved_lifecycle = lifecycle or agent.get("lifecycleDefault") or "temporary"
+    if role == "pipeline-runner":
+        if lifecycle not in (None, "temporary"):
+            raise RuntimeError("pipeline-runner lifecycle must be temporary")
+        resolved_lifecycle = "temporary"
+    else:
+        resolved_lifecycle = lifecycle or agent.get("lifecycleDefault") or "temporary"
     if resolved_lifecycle not in ("temporary", "persistent"):
         raise RuntimeError("lifecycle must be temporary|persistent")
 
@@ -199,9 +216,10 @@ def spawn_specialist(
     if find_instance(data, instance_name):
         raise RuntimeError(f"instance name already claimed: {instance_name}")
 
+    fixed_runner = role == "pipeline-runner"
     charter = agent.get("charterPath") or f".pi/agency/charters/{role}.md"
-    skill = agent.get("skillPath")
-    agent_path = agent_file_for(role, agent)
+    skill = None if fixed_runner else agent.get("skillPath")
+    agent_path = None if fixed_runner else agent_file_for(role, agent)
     fm = parse_agent_frontmatter(agent_path) if agent_path else {}
     tools = fm.get("tools")
     spawn_cwd = Path(cwd).resolve() if cwd else project_root()
@@ -254,7 +272,15 @@ def spawn_specialist(
         row["status"] = "idle"
         row["updatedAt"] = utc_now()
         save_sessions(root, data)
-        return {"ok": True, "action": "spawn-dry-run", "instance": row}
+        result = {"ok": True, "action": "spawn-dry-run", "instance": row}
+        if fixed_runner:
+            result["processCommand"] = build_pipeline_runner_command(
+                work=spawn_cwd,
+                root=root,
+                project=project_root(),
+                instance=instance_name,
+            )
+        return result
 
     try:
         opened = open_pane(direction or "right", focus=False)
@@ -271,6 +297,31 @@ def spawn_specialist(
     save_sessions(root, data)
 
     work = str(spawn_cwd)
+    if fixed_runner:
+        process_cmd = build_pipeline_runner_command(
+            work=spawn_cwd,
+            root=root,
+            project=project_root(),
+            instance=instance_name,
+        )
+        try:
+            send_to_surface(surface, process_cmd)
+        except RuntimeError as e:
+            row["status"] = "failed"
+            row["updatedAt"] = utc_now()
+            save_sessions(root, data)
+            raise RuntimeError(f"cmux send pipeline runner failed: {e}") from e
+        row["status"] = "idle"
+        row["updatedAt"] = utc_now()
+        save_sessions(root, data)
+        return {
+            "ok": True,
+            "action": "spawn",
+            "instance": row,
+            "bootWaitSec": boot_wait,
+            "processCommand": process_cmd,
+        }
+
     boot = (
         message
         if message is not None
