@@ -9,21 +9,24 @@ queries that later integration units can consume.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
 import secrets
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-STATE_VERSION = 1
+STATE_VERSION = 2
 LOCK_VERSION = 1
 STATE_FILE = "pipelines.json"
 PREVIOUS_STATE_FILE = "pipelines.json.prev"
 LOCK_FILE = "pipelines.lock"
+EXECUTION_LOCK_FILE = "pipelines.execution.lock"
 
 STAGE_STATUSES = frozenset(
     {"pending", "dispatched", "succeeded", "failed", "dependency_failed", "needs_attention"}
@@ -69,6 +72,10 @@ class PipelineLockOwnershipError(PipelineLockError):
     """A mutation or release was attempted by someone other than the lock owner."""
 
 
+class PipelineExecutionConflict(PipelineStateError):
+    """Another process or thread is currently driving this project's pipeline."""
+
+
 class ActivePipelineError(PipelineStateError):
     """The project already has an active pipeline."""
 
@@ -109,6 +116,71 @@ def _previous_path(root: Path) -> Path:
 
 def _lock_path(root: Path) -> Path:
     return root / LOCK_FILE
+
+
+def _execution_lock_path(root: Path) -> Path:
+    return root / EXECUTION_LOCK_FILE
+
+
+@contextmanager
+def pipeline_execution_guard(root: Path):
+    """Hold a non-blocking kernel advisory lock for one complete driver execution.
+
+    The lock file is not an ownership record and may persist. The kernel releases
+    the advisory lock if the process crashes; no timestamp or stale heuristic is
+    involved.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    path = _execution_lock_path(root)
+    stream = path.open("a+b")
+    locked = False
+    try:
+        if os.name == "posix":
+            try:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except (OSError, ImportError) as exc:
+                raise PipelineExecutionConflict(
+                    f"pipeline execution guard is already held or unavailable: {path}"
+                ) from exc
+        elif os.name == "nt":
+            try:
+                import msvcrt
+
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                locked = True
+            except (OSError, ImportError) as exc:
+                raise PipelineExecutionConflict(
+                    f"pipeline execution guard is already held or unavailable: {path}"
+                ) from exc
+        else:
+            raise PipelineExecutionConflict(
+                f"pipeline execution guard is unsupported on platform {os.name!r}"
+            )
+        yield
+    finally:
+        if locked:
+            try:
+                if os.name == "posix":
+                    import fcntl
+
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                else:
+                    import msvcrt
+
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                stream.close()
+        else:
+            stream.close()
 
 
 def _fsync_directory(root: Path) -> None:
@@ -293,6 +365,12 @@ def _validate_stage(stage: Any, context: str) -> dict[str, Any]:
         _validate_identifier(name, f"{context}.artifacts key")
         _require_string(path, f"{context}.artifacts[{name!r}]")
     _require_optional_string(stage.get("error"), f"{context}.error")
+    if status in {"failed", "dependency_failed", "needs_attention"} and (
+        not stage["error"] or not stage["error"].strip()
+    ):
+        raise PipelineStateValidationError(f"{context}: {status} stage requires non-blank error")
+    if status in {"pending", "dispatched", "succeeded"} and stage["error"] is not None:
+        raise PipelineStateValidationError(f"{context}: {status} stage cannot have error")
     for field in ("createdAt", "updatedAt"):
         _require_string(stage.get(field), f"{context}.{field}")
     for field in ("dispatchedAt", "completedAt"):
@@ -303,15 +381,86 @@ def _validate_stage(stage: Any, context: str) -> dict[str, Any]:
         if stage["dispatchedAt"] is not None or stage["completedAt"] is not None:
             raise PipelineStateValidationError(f"{context}: pending stage cannot have dispatch/completion timestamps")
     elif status == "dependency_failed":
-        if stage["assignedInstance"] is not None:
+        if stage["assignedInstance"] is not None or stage["dispatchedAt"] is not None:
             raise PipelineStateValidationError(f"{context}: dependency-failed stage was not dispatched")
+    elif status == "needs_attention" and stage["dispatchedAt"] is None:
+        if stage["assignedInstance"] is not None:
+            raise PipelineStateValidationError(f"{context}: undispatched attention cannot have assignedInstance")
     else:
         _require_string(stage["assignedInstance"], f"{context}.assignedInstance")
+        if stage["dispatchedAt"] is None:
+            raise PipelineStateValidationError(f"{context}: dispatched stage requires dispatchedAt")
     if status == "dispatched" and stage["dispatchedAt"] is None:
         raise PipelineStateValidationError(f"{context}: dispatched stage requires dispatchedAt")
     if status in TERMINAL_STAGE_STATUSES and stage["completedAt"] is None:
         raise PipelineStateValidationError(f"{context}: terminal stage requires completedAt")
     return copy.deepcopy(stage)
+
+
+def _validate_run_coherence(run: Mapping[str, Any], stages: list[dict[str, Any]], context: str) -> None:
+    status = run["status"]
+    current = run["currentStageId"]
+    statuses = [stage["status"] for stage in stages]
+    terminal_prior = {"succeeded", "failed", "dependency_failed"}
+
+    if status in {"succeeded", "failed"}:
+        if current is not None:
+            raise PipelineStateValidationError(f"{context}: terminal run currentStageId must be null")
+        if "dispatched" in statuses or "needs_attention" in statuses:
+            raise PipelineStateValidationError(f"{context}: terminal run contains uncertain stage work")
+        if status == "succeeded":
+            if any(item != "succeeded" for item in statuses):
+                raise PipelineStateValidationError(f"{context}: succeeded run requires every stage succeeded")
+            return
+        if run["onFailure"] == "stop":
+            failed = [index for index, item in enumerate(statuses) if item == "failed"]
+            if len(failed) != 1:
+                raise PipelineStateValidationError(f"{context}: stopped failed run requires one failed stage")
+            index = failed[0]
+            if any(item != "succeeded" for item in statuses[:index]) or any(
+                item != "pending" for item in statuses[index + 1 :]
+            ):
+                raise PipelineStateValidationError(
+                    f"{context}: stopped failed run must preserve succeeded prefix and pending suffix"
+                )
+        else:
+            if not any(item in {"failed", "dependency_failed"} for item in statuses) or any(
+                item not in terminal_prior for item in statuses
+            ):
+                raise PipelineStateValidationError(
+                    f"{context}: continued failed run requires fully classified terminal stages"
+                )
+        return
+
+    if current is None:
+        raise PipelineStateValidationError(f"{context}: active run requires actionable currentStageId")
+    index = next((i for i, stage in enumerate(stages) if stage["id"] == current), -1)
+    if index < 0:
+        raise PipelineStateValidationError(f"{context}.currentStageId is unknown")
+    before = statuses[:index]
+    after = statuses[index + 1 :]
+    if any(item not in terminal_prior for item in before) or any(item != "pending" for item in after):
+        raise PipelineStateValidationError(
+            f"{context}: active run requires terminal prefix and pending suffix"
+        )
+    if run["onFailure"] == "stop" and any(item != "succeeded" for item in before):
+        raise PipelineStateValidationError(f"{context}: stopped policy cannot continue after failure")
+    if status == "running":
+        if statuses[index] not in {"pending", "dispatched"}:
+            raise PipelineStateValidationError(f"{context}: running current stage must be pending or dispatched")
+        if "needs_attention" in statuses:
+            raise PipelineStateValidationError(f"{context}: running run cannot contain needs_attention")
+        if statuses.count("dispatched") > 1 or (
+            "dispatched" in statuses and statuses[index] != "dispatched"
+        ):
+            raise PipelineStateValidationError(f"{context}: only the running current stage may be dispatched")
+    else:
+        if statuses[index] != "needs_attention":
+            raise PipelineStateValidationError(f"{context}: attention current stage must need attention")
+        if statuses.count("needs_attention") != 1 or "dispatched" in statuses:
+            raise PipelineStateValidationError(
+                f"{context}: attention run must contain one attention stage and no dispatched stage"
+            )
 
 
 def _validate_run(run: Any, context: str) -> dict[str, Any]:
@@ -323,6 +472,7 @@ def _validate_run(run: Any, context: str) -> dict[str, Any]:
         "topic",
         "status",
         "onFailure",
+        "definitionDigest",
         "currentStageId",
         "runnerInstance",
         "runnerSurface",
@@ -341,6 +491,9 @@ def _validate_run(run: Any, context: str) -> dict[str, Any]:
         raise PipelineStateValidationError(f"{context}.status is unknown: {run.get('status')!r}")
     if run.get("onFailure") not in {"stop", "continue"}:
         raise PipelineStateValidationError(f"{context}.onFailure must be stop or continue")
+    digest = _require_string(run.get("definitionDigest"), f"{context}.definitionDigest")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise PipelineStateValidationError(f"{context}.definitionDigest must be a canonical SHA-256")
     _require_optional_string(run.get("currentStageId"), f"{context}.currentStageId")
     _require_optional_string(run.get("runnerInstance"), f"{context}.runnerInstance")
     _require_optional_string(run.get("runnerSurface"), f"{context}.runnerSurface")
@@ -358,18 +511,19 @@ def _validate_run(run: Any, context: str) -> dict[str, Any]:
         raise PipelineStateValidationError(f"{context}.stages must be a non-empty list")
     normalized_stages = [_validate_stage(stage, f"{context}.stages[{index}]") for index, stage in enumerate(stages)]
     ids = [stage["id"] for stage in normalized_stages]
-    tasks = [stage["taskId"] for stage in normalized_stages]
     if len(ids) != len(set(ids)):
         raise PipelineStateValidationError(f"{context} has duplicate stage ids")
-    if len(tasks) != len(set(tasks)):
-        raise PipelineStateValidationError(f"{context} has duplicate task ids")
-    current = run.get("currentStageId")
-    if current is not None and current not in ids:
-        raise PipelineStateValidationError(f"{context}.currentStageId is unknown")
+    for index, stage in enumerate(normalized_stages, 1):
+        expected_task = f"pl-{run['pipelineId']}-s{index}"
+        if stage["taskId"] != expected_task:
+            raise PipelineStateValidationError(
+                f"{context}.stages[{index - 1}].taskId must be stable value {expected_task!r}"
+            )
     if run["status"] in {"succeeded", "failed"} and run["completedAt"] is None:
         raise PipelineStateValidationError(f"{context}: terminal run requires completedAt")
     if run["status"] in ACTIVE_RUN_STATUSES and run["completedAt"] is not None:
         raise PipelineStateValidationError(f"{context}: active run cannot have completedAt")
+    _validate_run_coherence(run, normalized_stages, context)
     normalized = copy.deepcopy(run)
     normalized["stages"] = normalized_stages
     return normalized
@@ -415,22 +569,29 @@ def load_state(root: Path) -> dict[str, Any]:
     """Load primary state, falling back to the last valid prior generation."""
     primary = _state_path(root)
     previous = _previous_path(root)
+    primary_exists = primary.exists()
+    previous_exists = previous.exists()
     errors: list[str] = []
-    if primary.exists():
+    if primary_exists:
         try:
             return _read_generation(primary)
         except PipelineStateCorruption as exc:
             errors.append(f"primary generation invalid ({exc})")
     else:
         errors.append("primary generation missing")
-    if previous.exists():
+    if previous_exists:
         try:
-            return _read_generation(previous)
+            prior = _read_generation(previous)
+            if prior["activePipelineId"] is not None:
+                raise PipelineStateCorruption(
+                    "refusing active previous-generation fallback; operator reconciliation is required"
+                )
+            return prior
         except PipelineStateCorruption as exc:
             errors.append(f"previous generation invalid ({exc})")
     else:
         errors.append("previous generation missing")
-    if not primary.exists() and not previous.exists():
+    if not primary_exists and not previous_exists:
         return empty_state()
     raise PipelineStateCorruption("unrecoverable pipeline state: " + "; ".join(errors))
 
@@ -478,15 +639,17 @@ def _assert_lock(root: Path, pipeline_id: str, owner_id: str) -> dict[str, Any]:
     return lock
 
 
-def _validate_definition(definition: Mapping[str, Any]) -> list[dict[str, str]]:
+def _canonical_definition(definition: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the operational definition in its canonical, digestible shape."""
     if not isinstance(definition, Mapping):
         raise PipelineStateValidationError("pipeline definition must be a mapping")
-    if definition.get("onFailure", "stop") not in {"stop", "continue"}:
+    on_failure = definition.get("onFailure", "stop")
+    if on_failure not in {"stop", "continue"}:
         raise PipelineStateValidationError("pipeline definition has invalid onFailure")
     stages = definition.get("stages")
     if not isinstance(stages, list) or not stages:
         raise PipelineStateValidationError("pipeline definition requires non-empty stages")
-    result: list[dict[str, str]] = []
+    normalized_stages: list[dict[str, Any]] = []
     seen: set[str] = set()
     for index, stage in enumerate(stages):
         if not isinstance(stage, Mapping):
@@ -496,8 +659,63 @@ def _validate_definition(definition: Mapping[str, Any]) -> list[dict[str, str]]:
         if stage_id in seen:
             raise PipelineStateValidationError(f"pipeline definition has duplicate stage {stage_id!r}")
         seen.add(stage_id)
-        result.append({"id": stage_id, "role": role})
-    return result
+        goal = _require_string(stage.get("goal"), f"pipeline definition stage {stage_id!r} goal")
+        outputs = stage.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            raise PipelineStateValidationError(f"pipeline definition stage {stage_id!r} outputs must be non-empty")
+        normalized_outputs = [
+            _validate_identifier(output, f"pipeline definition stage {stage_id!r} output")
+            for output in outputs
+        ]
+        if len(normalized_outputs) != len(set(normalized_outputs)):
+            raise PipelineStateValidationError(f"pipeline definition stage {stage_id!r} has duplicate outputs")
+        inputs = stage.get("inputs", [])
+        if not isinstance(inputs, list):
+            raise PipelineStateValidationError(f"pipeline definition stage {stage_id!r} inputs must be a list")
+        normalized_inputs: list[dict[str, Any]] = []
+        for input_index, selector in enumerate(inputs):
+            if not isinstance(selector, Mapping):
+                raise PipelineStateValidationError(
+                    f"pipeline definition stage {stage_id!r} input {input_index + 1} must be a mapping"
+                )
+            source = _validate_identifier(
+                selector.get("stage"), f"pipeline definition stage {stage_id!r} input source"
+            )
+            artifacts = selector.get("artifacts")
+            if not isinstance(artifacts, list) or not artifacts:
+                raise PipelineStateValidationError(
+                    f"pipeline definition stage {stage_id!r} input artifacts must be non-empty"
+                )
+            normalized_inputs.append(
+                {
+                    "stage": source,
+                    "artifacts": [
+                        _validate_identifier(
+                            artifact, f"pipeline definition stage {stage_id!r} input artifact"
+                        )
+                        for artifact in artifacts
+                    ],
+                }
+            )
+        normalized_stages.append(
+            {
+                "id": stage_id,
+                "role": role,
+                "goal": goal,
+                "outputs": normalized_outputs,
+                "inputs": normalized_inputs,
+            }
+        )
+    return {"onFailure": on_failure, "stages": normalized_stages}
+
+
+def pipeline_definition_digest(definition: Mapping[str, Any]) -> str:
+    """Return a canonical SHA-256 over execution-affecting pipeline fields."""
+    canonical = _canonical_definition(definition)
+    encoded = json.dumps(
+        canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def create_run(
@@ -516,7 +734,8 @@ def create_run(
     _validate_identifier(pipeline_name, "pipeline_name")
     _require_string(topic, "topic")
     _assert_lock(root, pipeline_id, lock_owner)
-    definition_stages = _validate_definition(definition)
+    canonical_definition = _canonical_definition(definition)
+    definition_stages = canonical_definition["stages"]
     data = load_state(root)
     if data["activePipelineId"] is not None:
         raise ActivePipelineError(f"active pipeline {data['activePipelineId']!r} already exists")
@@ -546,7 +765,8 @@ def create_run(
         "pipelineName": pipeline_name,
         "topic": topic,
         "status": "running",
-        "onFailure": definition.get("onFailure", "stop"),
+        "onFailure": canonical_definition["onFailure"],
+        "definitionDigest": pipeline_definition_digest(canonical_definition),
         "currentStageId": stages[0]["id"],
         "runnerInstance": runner_instance,
         "runnerSurface": runner_surface,
@@ -680,21 +900,26 @@ def record_dispatched(
 
 
 def _update_run_after_transition(data: dict[str, Any], run: dict[str, Any], stage: dict[str, Any], now: str) -> None:
-    status = stage["status"]
-    if status == "needs_attention":
-        run["status"] = "needs_attention"
-        run["currentStageId"] = stage["id"]
-        return
-    if status == "failed" and run["onFailure"] == "stop":
+    if stage["status"] == "failed" and run["onFailure"] == "stop":
         run["status"] = "failed"
         run["currentStageId"] = None
         run["completedAt"] = now
         data["activePipelineId"] = None
         return
-    remaining = [item for item in run["stages"] if item["status"] in {"pending", "dispatched"}]
-    if remaining:
+    attention = [item for item in run["stages"] if item["status"] == "needs_attention"]
+    if attention:
+        run["status"] = "needs_attention"
+        run["currentStageId"] = attention[0]["id"]
+        return
+    dispatched = [item for item in run["stages"] if item["status"] == "dispatched"]
+    if dispatched:
         run["status"] = "running"
-        run["currentStageId"] = remaining[0]["id"]
+        run["currentStageId"] = dispatched[0]["id"]
+        return
+    pending = [item for item in run["stages"] if item["status"] == "pending"]
+    if pending:
+        run["status"] = "running"
+        run["currentStageId"] = pending[0]["id"]
         return
     run["status"] = "failed" if any(
         item["status"] in {"failed", "dependency_failed"} for item in run["stages"]
@@ -724,8 +949,12 @@ def transition_stage(
     if data["activePipelineId"] != pipeline_id:
         raise ActivePipelineError(f"pipeline {pipeline_id!r} is not active")
     stage = _stage_from_run(run, stage_id)
+    if run["currentStageId"] != stage_id:
+        raise IllegalStageTransition(
+            f"only current stage {run['currentStageId']!r} may transition, got {stage_id!r}"
+        )
     allowed = {
-        "pending": {"dispatched", "dependency_failed"},
+        "pending": {"dispatched", "dependency_failed", "needs_attention"},
         "dispatched": {"succeeded", "failed", "needs_attention"},
         "succeeded": set(),
         "failed": set(),
@@ -742,7 +971,9 @@ def transition_stage(
         _require_string(summary, "summary", allow_empty=True)
     if error is not None:
         _require_string(error, "error")
-    if new_status in {"failed", "dependency_failed", "needs_attention"} and not error:
+    if new_status in {"failed", "dependency_failed", "needs_attention"} and (
+        not error or not error.strip()
+    ):
         raise PipelineStateValidationError(f"{new_status} transition requires error")
     normalized_artifacts: dict[str, str] | None = None
     if artifacts is not None:
@@ -773,6 +1004,61 @@ def transition_stage(
     return copy.deepcopy(stage)
 
 
+def record_reconciled_result(
+    root: Path,
+    pipeline_id: str,
+    stage_id: str,
+    *,
+    lock_owner: str,
+    status: str,
+    summary: str,
+    artifacts: Mapping[str, str],
+    error: str | None,
+) -> dict[str, Any]:
+    """Record an exact late result only for work known to have been dispatched."""
+    if status not in {"succeeded", "failed"}:
+        raise IllegalStageTransition("reconciled status must be succeeded or failed")
+    _assert_lock(root, pipeline_id, lock_owner)
+    data = load_state(root)
+    run = _run_from_data(data, pipeline_id)
+    if data["activePipelineId"] != pipeline_id:
+        raise ActivePipelineError(f"pipeline {pipeline_id!r} is not active")
+    stage = _stage_from_run(run, stage_id)
+    if run["currentStageId"] != stage_id:
+        raise IllegalStageTransition(
+            f"only current stage {run['currentStageId']!r} may reconcile, got {stage_id!r}"
+        )
+    if stage["assignedInstance"] is None or stage["dispatchedAt"] is None:
+        raise IllegalStageTransition("cannot reconcile a stage that was never dispatched")
+    if stage["status"] not in {"dispatched", "needs_attention"}:
+        raise IllegalStageTransition(
+            f"cannot reconcile stage in status {stage['status']!r}"
+        )
+    if not isinstance(summary, str) or not summary.strip():
+        raise PipelineStateValidationError("reconciled summary must be a non-blank string")
+    if status == "failed" and (not error or not error.strip()):
+        raise PipelineStateValidationError("failed reconciliation requires non-blank error")
+    if status == "succeeded" and error is not None:
+        raise PipelineStateValidationError("succeeded reconciliation cannot have error")
+    normalized_artifacts: dict[str, str] = {}
+    if not isinstance(artifacts, Mapping):
+        raise PipelineStateValidationError("artifacts must be a mapping")
+    for name, path in artifacts.items():
+        key = _validate_identifier(name, "artifact name")
+        normalized_artifacts[key] = _require_string(path, f"artifact {key!r} path")
+    now = _now()
+    stage["status"] = status
+    stage["summary"] = summary
+    stage["artifacts"] = normalized_artifacts
+    stage["error"] = error
+    stage["updatedAt"] = now
+    stage["completedAt"] = now
+    run["updatedAt"] = now
+    _update_run_after_transition(data, run, stage, now)
+    save_state(root, data)
+    return copy.deepcopy(stage)
+
+
 def classify_resume(stage: Mapping[str, Any], report_exists: Callable[[str], bool]) -> ResumeAction:
     """Classify a stage for resume without performing execution or retry."""
     status = stage.get("status")
@@ -780,7 +1066,8 @@ def classify_resume(stage: Mapping[str, Any], report_exists: Callable[[str], boo
         raise PipelineStateValidationError(f"cannot resume stage with unknown status {status!r}")
     if status == "succeeded":
         return ResumeAction.SKIP
-    if status == "dispatched":
+    dispatched = stage.get("assignedInstance") is not None and stage.get("dispatchedAt") is not None
+    if status == "dispatched" or (status == "needs_attention" and dispatched):
         task_id = _require_string(stage.get("taskId"), "dispatched stage taskId")
         return ResumeAction.RECONCILE if report_exists(task_id) else ResumeAction.NEEDS_ATTENTION
     if status == "pending":
@@ -801,7 +1088,7 @@ def reconcile_resume(
     stage = get_run(root, pipeline_id)
     stage_record = _stage_from_run(stage, stage_id)
     action = classify_resume(stage_record, report_exists)
-    if action is ResumeAction.NEEDS_ATTENTION:
+    if action is ResumeAction.NEEDS_ATTENTION and stage_record["status"] == "dispatched":
         transition_stage(
             root,
             pipeline_id,

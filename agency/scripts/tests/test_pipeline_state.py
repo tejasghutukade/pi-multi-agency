@@ -49,6 +49,16 @@ def create(tmp_path: Path, *, pipeline_id: str = "p-123", owner_id: str = "owner
     )
 
 
+def test_state_version_is_bumped_without_silent_migration(tmp_path: Path):
+    assert state.STATE_VERSION == 2
+    assert state.empty_state()["version"] == 2
+    (tmp_path / "pipelines.json").write_text(
+        json.dumps({"version": 1, "activePipelineId": None, "runs": []})
+    )
+    with pytest.raises(state.PipelineStateCorruption, match="unsupported version 1"):
+        state.load_state(tmp_path)
+
+
 def test_lock_is_exclusive_durable_and_release_is_owner_checked(tmp_path: Path):
     acquire(tmp_path)
     lock = state.read_lock(tmp_path)
@@ -172,6 +182,8 @@ def test_create_and_get_active_run_with_stable_stage_records(tmp_path: Path):
     assert run["pipelineName"] == "implementation"
     assert run["topic"] == "crash safety"
     assert run["status"] == "running"
+    assert run["definitionDigest"] == state.pipeline_definition_digest(PIPELINE)
+    assert len(run["definitionDigest"]) == 64
     assert run["currentStageId"] == "scout"
     assert run["runnerInstance"] is None and run["runnerSurface"] is None
     assert run["finalTaskId"] == "pipe-done-p-123"
@@ -183,6 +195,26 @@ def test_create_and_get_active_run_with_stable_stage_records(tmp_path: Path):
     assert state.get_active_run(tmp_path) == run
     with pytest.raises(state.UnknownPipelineError):
         state.get_run(tmp_path, "missing")
+
+
+def test_definition_digest_is_operational_canonical_and_validated(tmp_path: Path):
+    create(tmp_path)
+    run = state.get_run(tmp_path, "p-123")
+    reordered_metadata = {
+        "description": "changed only",
+        "stages": PIPELINE["stages"],
+        "onFailure": "stop",
+    }
+    assert state.pipeline_definition_digest(reordered_metadata) == run["definitionDigest"]
+    changed = dict(reordered_metadata)
+    changed["stages"] = [dict(stage) for stage in PIPELINE["stages"]]
+    changed["stages"][0]["goal"] = "Different {topic}"
+    assert state.pipeline_definition_digest(changed) != run["definitionDigest"]
+
+    data = state.load_state(tmp_path)
+    data["runs"][0]["definitionDigest"] = "not-a-digest"
+    with pytest.raises(state.PipelineStateValidationError, match="canonical SHA-256"):
+        state.save_state(tmp_path, data)
 
 
 def test_final_task_id_is_stable_and_validated(tmp_path: Path):
@@ -327,8 +359,40 @@ def test_legal_transitions_advance_run_and_illegal_transitions_fail(tmp_path: Pa
     assert state.get_active_run(tmp_path) is None
 
 
-def test_dependency_failed_is_only_legal_from_pending(tmp_path: Path):
+def test_pending_can_enter_undispatched_attention(tmp_path: Path):
     create(tmp_path)
+    stage = state.transition_stage(
+        tmp_path,
+        "p-123",
+        "scout",
+        "needs_attention",
+        lock_owner="owner-1",
+        error="catalog changed",
+    )
+    assert stage["assignedInstance"] is None
+    assert stage["dispatchedAt"] is None
+    assert stage["completedAt"] is not None
+    assert state.get_active_run(tmp_path)["status"] == "needs_attention"
+
+
+def test_dependency_failed_is_only_legal_from_current_pending(tmp_path: Path):
+    definition = dict(PIPELINE)
+    definition["onFailure"] = "continue"
+    acquire(tmp_path)
+    state.create_run(
+        tmp_path,
+        pipeline_id="p-123",
+        pipeline_name="implementation",
+        topic="dependencies",
+        definition=definition,
+        lock_owner="owner-1",
+    )
+    state.record_dispatched(
+        tmp_path, "p-123", "scout", lock_owner="owner-1", assigned_instance="scout-t1"
+    )
+    state.transition_stage(
+        tmp_path, "p-123", "scout", "failed", lock_owner="owner-1", error="scout failed"
+    )
     stage = state.transition_stage(
         tmp_path,
         "p-123",
@@ -339,7 +403,7 @@ def test_dependency_failed_is_only_legal_from_pending(tmp_path: Path):
     )
     assert stage["status"] == "dependency_failed"
     assert stage["assignedInstance"] is None
-    with pytest.raises(state.IllegalStageTransition):
+    with pytest.raises(state.PipelineStateError):
         state.record_dispatched(tmp_path, "p-123", "implement", lock_owner="owner-1", assigned_instance="worker-t1")
 
 
@@ -395,6 +459,65 @@ def test_resume_classification_reconciles_or_escalates_without_retry(tmp_path: P
         state.record_dispatched(tmp_path, "p-123", "scout", lock_owner="owner-1", assigned_instance="scout-t1")
 
 
+def test_late_report_reconciliation_is_narrow_and_requires_prior_dispatch(tmp_path: Path):
+    create(tmp_path)
+    with pytest.raises(state.IllegalStageTransition, match="never dispatched"):
+        state.record_reconciled_result(
+            tmp_path,
+            "p-123",
+            "scout",
+            lock_owner="owner-1",
+            status="succeeded",
+            summary="late",
+            artifacts={},
+            error=None,
+        )
+
+    state.record_dispatched(
+        tmp_path, "p-123", "scout", lock_owner="owner-1", assigned_instance="scout-t1"
+    )
+    state.transition_stage(
+        tmp_path,
+        "p-123",
+        "scout",
+        "needs_attention",
+        lock_owner="owner-1",
+        error="timeout",
+    )
+    attention = state.get_run(tmp_path, "p-123")["stages"][0]
+    calls = []
+    assert state.classify_resume(attention, lambda task: calls.append(task) or True) == state.ResumeAction.RECONCILE
+    assert calls == ["pl-p-123-s1"]
+    assert state.reconcile_resume(
+        tmp_path, "p-123", "scout", lambda _task: False, lock_owner="owner-1"
+    ) == state.ResumeAction.NEEDS_ATTENTION
+    assert state.get_run(tmp_path, "p-123")["stages"][0]["error"] == "timeout"
+    reconciled = state.record_reconciled_result(
+        tmp_path,
+        "p-123",
+        "scout",
+        lock_owner="owner-1",
+        status="succeeded",
+        summary="late success",
+        artifacts={"primary": "artifacts/scout.md"},
+        error=None,
+    )
+    assert reconciled["status"] == "succeeded"
+    assert state.get_active_run(tmp_path)["status"] == "running"
+
+
+def test_undispatched_attention_does_not_query_for_resume(tmp_path: Path):
+    create(tmp_path)
+    state.transition_stage(
+        tmp_path, "p-123", "scout", "needs_attention", lock_owner="owner-1", error="before spawn"
+    )
+    stage = state.get_run(tmp_path, "p-123")["stages"][0]
+    assert state.classify_resume(
+        stage, lambda _task: pytest.fail("undispatched attention must not query")
+    ) == state.ResumeAction.TERMINAL
+    assert "retry" not in {action.value for action in state.ResumeAction}
+
+
 def test_resume_skips_succeeded_and_never_calls_report_lookup(tmp_path: Path):
     create(tmp_path)
     state.record_dispatched(tmp_path, "p-123", "scout", lock_owner="owner-1", assigned_instance="scout-t1")
@@ -405,6 +528,104 @@ def test_resume_skips_succeeded_and_never_calls_report_lookup(tmp_path: Path):
 
     stage = state.get_run(tmp_path, "p-123")["stages"][0]
     assert state.classify_resume(stage, unexpected) == state.ResumeAction.SKIP
+
+
+def test_schema_rejects_forged_task_ids_and_active_stage_layouts(tmp_path: Path):
+    create(tmp_path)
+    original = state.load_state(tmp_path)
+
+    forged_task = json.loads(json.dumps(original))
+    forged_task["runs"][0]["stages"][0]["taskId"] = "pl-p-123-s2"
+    with pytest.raises(state.PipelineStateValidationError, match="taskId must be stable"):
+        state.validate_state(forged_task)
+
+    wrong_current = json.loads(json.dumps(original))
+    wrong_current["runs"][0]["currentStageId"] = "implement"
+    with pytest.raises(state.PipelineStateValidationError, match="terminal prefix and pending suffix"):
+        state.validate_state(wrong_current)
+
+    no_current = json.loads(json.dumps(original))
+    no_current["runs"][0]["currentStageId"] = None
+    with pytest.raises(state.PipelineStateValidationError, match="actionable currentStageId"):
+        state.validate_state(no_current)
+
+    two_dispatched = json.loads(json.dumps(original))
+    timestamp = two_dispatched["runs"][0]["createdAt"]
+    for index, instance in ((0, "scout-t1"), (1, "worker-t1")):
+        stage = two_dispatched["runs"][0]["stages"][index]
+        stage["status"] = "dispatched"
+        stage["assignedInstance"] = instance
+        stage["dispatchedAt"] = timestamp
+    with pytest.raises(state.PipelineStateValidationError, match="pending suffix|only the running"):
+        state.validate_state(two_dispatched)
+
+    stopped_attention = json.loads(json.dumps(original))
+    timestamp = stopped_attention["runs"][0]["createdAt"]
+    failed = stopped_attention["runs"][0]["stages"][0]
+    failed.update(
+        status="failed",
+        assignedInstance="scout-t1",
+        dispatchedAt=timestamp,
+        completedAt=timestamp,
+        error="boom",
+    )
+    attention = stopped_attention["runs"][0]["stages"][1]
+    attention.update(status="needs_attention", completedAt=timestamp, error="forged continuation")
+    stopped_attention["runs"][0]["status"] = "needs_attention"
+    stopped_attention["runs"][0]["currentStageId"] = "implement"
+    with pytest.raises(state.PipelineStateValidationError, match="stopped policy cannot continue"):
+        state.validate_state(stopped_attention)
+
+
+def test_schema_rejects_incoherent_terminal_outcomes(tmp_path: Path):
+    create(tmp_path)
+    data = state.load_state(tmp_path)
+    run = data["runs"][0]
+    run["status"] = "succeeded"
+    run["currentStageId"] = None
+    run["completedAt"] = run["updatedAt"]
+    data["activePipelineId"] = None
+    with pytest.raises(state.PipelineStateValidationError, match="every stage succeeded"):
+        state.validate_state(data)
+
+    # Produce a legitimate stopped failure, then forge its pending suffix.
+    state.record_dispatched(
+        tmp_path, "p-123", "scout", lock_owner="owner-1", assigned_instance="scout-t1"
+    )
+    state.transition_stage(
+        tmp_path, "p-123", "scout", "failed", lock_owner="owner-1", error="boom"
+    )
+    failed = state.load_state(tmp_path)
+    later = failed["runs"][0]["stages"][1]
+    later["status"] = "dependency_failed"
+    later["error"] = "forged"
+    later["completedAt"] = failed["runs"][0]["completedAt"]
+    with pytest.raises(state.PipelineStateValidationError, match="pending suffix"):
+        state.validate_state(failed)
+
+
+def test_only_current_stage_can_transition_or_reconcile(tmp_path: Path):
+    create(tmp_path)
+    with pytest.raises(state.IllegalStageTransition, match="only current stage 'scout'"):
+        state.transition_stage(
+            tmp_path,
+            "p-123",
+            "implement",
+            "needs_attention",
+            lock_owner="owner-1",
+            error="out of order",
+        )
+    with pytest.raises(state.IllegalStageTransition, match="only current stage 'scout'"):
+        state.record_reconciled_result(
+            tmp_path,
+            "p-123",
+            "implement",
+            lock_owner="owner-1",
+            status="succeeded",
+            summary="forged",
+            artifacts={},
+            error=None,
+        )
 
 
 def test_state_module_has_no_runner_or_cli_dependency():
@@ -423,6 +644,20 @@ def _valid_terminal_run(pipeline_id: str) -> dict:
         "topic": "topic",
         "status": "succeeded",
         "onFailure": "stop",
+        "definitionDigest": state.pipeline_definition_digest(
+            {
+                "onFailure": "stop",
+                "stages": [
+                    {
+                        "id": "only",
+                        "role": "scout",
+                        "goal": "Only {topic}",
+                        "outputs": ["primary"],
+                        "inputs": [],
+                    }
+                ],
+            }
+        ),
         "currentStageId": None,
         "runnerInstance": None,
         "runnerSurface": None,
