@@ -21,7 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-STATE_VERSION = 3
+STATE_VERSION = 4
 LOCK_VERSION = 1
 STATE_FILE = "pipelines.json"
 PREVIOUS_STATE_FILE = "pipelines.json.prev"
@@ -98,6 +98,7 @@ class ResumeAction(str, Enum):
     SKIP = "skip"
     RECONCILE = "reconcile"
     NEEDS_ATTENTION = "needs_attention"
+    RE_DISPATCH = "re_dispatch"
     PENDING = "pending"
     TERMINAL = "terminal"
 
@@ -392,6 +393,7 @@ def _validate_stage(stage: Any, context: str) -> dict[str, Any]:
         "summary",
         "artifacts",
         "error",
+        "operatorResponse",
         "createdAt",
         "updatedAt",
         "dispatchedAt",
@@ -414,12 +416,17 @@ def _validate_stage(stage: Any, context: str) -> dict[str, Any]:
         _validate_identifier(name, f"{context}.artifacts key")
         _require_string(path, f"{context}.artifacts[{name!r}]")
     _require_optional_string(stage.get("error"), f"{context}.error")
+    _require_optional_string(stage.get("operatorResponse"), f"{context}.operatorResponse")
     if status in {"failed", "dependency_failed", "needs_attention"} and (
         not stage["error"] or not stage["error"].strip()
     ):
         raise PipelineStateValidationError(f"{context}: {status} stage requires non-blank error")
     if status in {"pending", "dispatched", "succeeded"} and stage["error"] is not None:
         raise PipelineStateValidationError(f"{context}: {status} stage cannot have error")
+    if status != "needs_attention" and stage["operatorResponse"] is not None:
+        raise PipelineStateValidationError(
+            f"{context}: operatorResponse is valid only on a needs_attention stage"
+        )
     for field in ("createdAt", "updatedAt"):
         _require_string(stage.get(field), f"{context}.{field}")
     for field in ("dispatchedAt", "completedAt"):
@@ -530,6 +537,7 @@ def _validate_run(run: Any, context: str) -> dict[str, Any]:
         "createdAt",
         "updatedAt",
         "completedAt",
+        "autoAsk",
         "stages",
     }
     if set(run) != required:
@@ -585,6 +593,8 @@ def _validate_run(run: Any, context: str) -> dict[str, Any]:
     _require_string(run.get("createdAt"), f"{context}.createdAt")
     _require_string(run.get("updatedAt"), f"{context}.updatedAt")
     _require_optional_string(run.get("completedAt"), f"{context}.completedAt")
+    if not isinstance(run.get("autoAsk"), bool):
+        raise PipelineStateValidationError(f"{context}.autoAsk must be a boolean")
     stages = run.get("stages")
     if not isinstance(stages, list) or not stages:
         raise PipelineStateValidationError(f"{context}.stages must be a non-empty list")
@@ -833,6 +843,7 @@ def create_run(
                 "summary": "",
                 "artifacts": {},
                 "error": None,
+                "operatorResponse": None,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
                 "dispatchedAt": None,
@@ -858,6 +869,7 @@ def create_run(
         "createdAt": timestamp,
         "updatedAt": timestamp,
         "completedAt": None,
+        "autoAsk": True,
         "stages": stages,
     }
     data["runs"].append(run)
@@ -1065,11 +1077,16 @@ def transition_stage(
     summary: str | None = None,
     artifacts: Mapping[str, str] | None = None,
     error: str | None = None,
+    operator_response: str | None = None,
     assigned_instance: str | None = None,
 ) -> dict[str, Any]:
     _assert_lock(root, pipeline_id, lock_owner)
     if new_status not in STAGE_STATUSES:
         raise IllegalStageTransition(f"unknown stage status {new_status!r}")
+    if operator_response is not None:
+        if new_status != "needs_attention":
+            raise PipelineStateValidationError("operator_response is valid only on a needs_attention transition")
+        _require_string(operator_response, "operator_response", allow_empty=True)
     data = load_state(root)
     run = _run_from_data(data, pipeline_id)
     if data["activePipelineId"] != pipeline_id:
@@ -1085,14 +1102,20 @@ def transition_stage(
         "succeeded": set(),
         "failed": set(),
         "dependency_failed": set(),
-        "needs_attention": set(),
+        # Re-dispatch (U8): a needs_attention stage that received an operator
+        # response is re-dispatched with the answer injected. This clears the
+        # stored response and refreshes dispatchedAt.
+        "needs_attention": {"dispatched"},
     }
     if new_status not in allowed[stage["status"]]:
         raise IllegalStageTransition(f"illegal stage transition {stage['status']!r} -> {new_status!r}")
     if stage["status"] == "pending" and new_status == "dispatched":
         assigned_instance = _require_string(assigned_instance, "assigned_instance")
+    elif new_status == "dispatched" and stage["status"] == "needs_attention":
+        # Re-dispatch: reuse or replace the assigned instance; the runner decides.
+        assigned_instance = _require_string(assigned_instance, "assigned_instance")
     elif assigned_instance is not None:
-        raise PipelineStateValidationError("assigned_instance is valid only when dispatching a pending stage")
+        raise PipelineStateValidationError("assigned_instance is valid only when dispatching a stage")
     if summary is not None:
         _require_string(summary, "summary", allow_empty=True)
     if error is not None:
@@ -1112,6 +1135,7 @@ def transition_stage(
     now = _now()
     if assigned_instance is not None:
         stage["assignedInstance"] = assigned_instance
+    was_needs_attention = stage["status"] == "needs_attention"
     stage["status"] = new_status
     stage["updatedAt"] = now
     if summary is not None:
@@ -1120,6 +1144,15 @@ def transition_stage(
         stage["artifacts"] = normalized_artifacts
     if error is not None:
         stage["error"] = error
+    if new_status == "needs_attention" and operator_response is not None:
+        stage["operatorResponse"] = operator_response
+    elif new_status != "needs_attention" and stage.get("operatorResponse") is not None:
+        # A stage that moves out of needs_attention has consumed its answer.
+        stage["operatorResponse"] = None
+    if new_status == "dispatched" and was_needs_attention:
+        # Re-dispatch (U8): the prior uncertainty is resolved; drop the stale error
+        # so validation does not see a dispatched stage carrying an error.
+        stage["error"] = None
     if new_status == "dispatched":
         stage["dispatchedAt"] = now
     else:
@@ -1185,6 +1218,43 @@ def record_reconciled_result(
     return copy.deepcopy(stage)
 
 
+def record_operator_response(
+    root: Path,
+    pipeline_id: str,
+    stage_id: str,
+    response: str,
+    *,
+    lock_owner: str,
+) -> dict[str, Any]:
+    """Persist a human answer for a needs_attention stage; no status transition.
+
+    The answer is bound to the exact stage that asked. Resume later consumes it by
+    re-dispatching the same stage with the answer injected (Design B: stateless
+    continuation). The stage status stays needs_attention until resume re-dispatches.
+    """
+    _assert_lock(root, pipeline_id, lock_owner)
+    data = load_state(root)
+    run = _run_from_data(data, pipeline_id)
+    if data["activePipelineId"] != pipeline_id:
+        raise ActivePipelineError(f"pipeline {pipeline_id!r} is not active")
+    stage = _stage_from_run(run, stage_id)
+    if stage["status"] != "needs_attention":
+        raise IllegalStageTransition(
+            f"operator response is valid only for a needs_attention stage, got {stage['status']!r}"
+        )
+    if stage.get("operatorResponse") is not None:
+        raise PipelineStateValidationError(
+            f"stage {stage_id!r} already has an operator response; resume before answering again"
+        )
+    response = _require_string(response, "response", allow_empty=True)
+    now = _now()
+    stage["operatorResponse"] = response
+    stage["updatedAt"] = now
+    run["updatedAt"] = now
+    save_state(root, data)
+    return copy.deepcopy(stage)
+
+
 def classify_resume(stage: Mapping[str, Any], report_exists: Callable[[str], bool]) -> ResumeAction:
     """Classify a stage for resume without performing execution or retry."""
     status = stage.get("status")
@@ -1194,6 +1264,8 @@ def classify_resume(stage: Mapping[str, Any], report_exists: Callable[[str], boo
         return ResumeAction.SKIP
     dispatched = stage.get("assignedInstance") is not None and stage.get("dispatchedAt") is not None
     if status == "dispatched" or (status == "needs_attention" and dispatched):
+        if status == "needs_attention" and stage.get("operatorResponse") is not None:
+            return ResumeAction.RE_DISPATCH
         task_id = _require_string(stage.get("taskId"), "dispatched stage taskId")
         return ResumeAction.RECONCILE if report_exists(task_id) else ResumeAction.NEEDS_ATTENTION
     if status == "pending":

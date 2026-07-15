@@ -50,8 +50,8 @@ def create(tmp_path: Path, *, pipeline_id: str = "p-123", owner_id: str = "owner
 
 
 def test_state_version_is_bumped_without_silent_migration(tmp_path: Path):
-    assert state.STATE_VERSION == 3
-    assert state.empty_state()["version"] == 3
+    assert state.STATE_VERSION == 4
+    assert state.empty_state()["version"] == 4
     (tmp_path / "pipelines.json").write_text(
         json.dumps({"version": 1, "activePipelineId": None, "runs": []})
     )
@@ -540,8 +540,16 @@ def test_resume_classification_reconciles_or_escalates_without_retry(tmp_path: P
     escalated = state.get_run(tmp_path, "p-123")["stages"][0]
     assert escalated["status"] == "needs_attention"
     assert "No report" in escalated["error"]
-    with pytest.raises(state.IllegalStageTransition):
-        state.record_dispatched(tmp_path, "p-123", "scout", lock_owner="owner-1", assigned_instance="scout-t1")
+    # U8: a needs_attention stage that received an operator response is re-dispatched
+    # (operator-driven continuation, NOT a silent runner retry). Re-dispatch goes
+    # through transition_stage(dispersed, assigned_instance=...), not record_dispatched.
+    state.record_operator_response(tmp_path, "p-123", "scout", "proceed", lock_owner="owner-1")
+    re_dispatched = state.transition_stage(
+        tmp_path, "p-123", "scout", "dispatched", lock_owner="owner-1", assigned_instance="scout-t1"
+    )
+    assert re_dispatched["status"] == "dispatched"
+    assert re_dispatched["operatorResponse"] is None
+    assert re_dispatched["error"] is None
 
 
 def test_late_report_reconciliation_is_narrow_and_requires_prior_dispatch(tmp_path: Path):
@@ -755,6 +763,7 @@ def _valid_terminal_run(pipeline_id: str) -> dict:
         "createdAt": timestamp,
         "updatedAt": timestamp,
         "completedAt": timestamp,
+        "autoAsk": True,
         "stages": [
             {
                 "id": "only",
@@ -765,6 +774,7 @@ def _valid_terminal_run(pipeline_id: str) -> dict:
                 "summary": "done",
                 "artifacts": {},
                 "error": None,
+                "operatorResponse": None,
                 "createdAt": timestamp,
                 "updatedAt": timestamp,
                 "dispatchedAt": timestamp,
