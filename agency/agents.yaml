@@ -12,6 +12,10 @@ orchestrator:
   tools: read,grep,find,ls,agency_init,agency_list,agency_spawn,agency_delegate,agency_release
 
 agents:
+  pipeline-runner:
+    intercomName: pipeline-runner
+    lifecycleDefault: temporary
+
   scout:
     charterPath: .pi/agency/charters/scout.md
     agentPath: .pi/agents/scout.md

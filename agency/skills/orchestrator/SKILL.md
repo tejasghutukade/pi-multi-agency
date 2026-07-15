@@ -156,6 +156,25 @@ Broker delivery is the task communication path.
 
 **Hub only** — specialists only message `orchestrator` through broker tools. Synthesize for the user with artifact paths.
 
+**Declarative pipelines (hands-off run):** when a `pipeline-runner` drives a named pipeline, intermediate stage `report`s are consumed by the bound runner and filtered from this chat — do **not** re-spawn or re-delegate those stage `taskId`s. Only the runner's final synthesis `report` and any pipeline `ask` arrive here. The runner advances stages deterministically; your job is to present the final synthesis and act on asks.
+
+To start one: `agency_spawn({ role: "pipeline-runner", pipeline: "<name>", topic: "<text>" })` (requires your orchestrator surface), then `agency_delegate({ to: <runner>, taskId: <finalTaskId>, payloadJson: JSON.stringify({ pipelineId, pipelineName, topic }) })`. The runner claims the delegate and drives the run; you stay free until the final synthesis lands.
+
+### Human-in-the-loop: pipeline `ask` (autoAsk ON)
+
+A stage that cannot proceed reports `needs_attention` with a **question**. The runner records it, stops the run, and sends a pipeline `ask` to you (type `ask`, `to: orchestrator`, payload carries `question`, optional `options`, and `context` = the asking stage's `summary` + `artifacts`). Because `autoAsk` is ON, you act on it automatically:
+
+1. **Call `ask_user`** with the payload's `question` and `options` (and the `context` as supporting detail) so the human answers in chat.
+2. On the human's reply, **record the answer and resume the runner** via the CLI:
+   ```text
+   agency_ctl pipeline-answer --pipeline-id <id> --stage <stageId> --answer '<reply>' --resume
+   ```
+   `<stageId>` is the asking stage's id from the `ask` `context`. `--resume` re-dispatches that **same** stage with the answer injected (Design B: the stage re-derives context from its prior summary/artifacts, it does not rely on pane memory). The stage then sends a terminal `report` and the pipeline continues.
+3. If the stage asks **again**, another `ask` arrives — repeat. A stage may ask several questions in sequence; each is one `needs_attention` → answer → re-dispatch cycle.
+4. Only the runner's final synthesis `report` and these pipeline `ask`s reach you. Stage `report`s are consumed by the bound runner and filtered from chat.
+
+Do **not** `ask_user` the human on a stage's behalf by calling `ask_user` from inside a stage, and do **not** re-spawn or re-delegate stage `taskId`s — the runner owns the stage lifecycle. The broker `ask` is the only human-in-the-loop path.
+
 ## Release / teardown
 
 ```text

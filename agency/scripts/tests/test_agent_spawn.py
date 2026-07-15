@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import json
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +16,30 @@ import pytest
 class FakeCtl:
     def __init__(self, root: Path):
         self.root = root
+        self.authority_calls = []
+        self.stage_spawn_calls = []
 
     def require_orchestrator(self, root, *, recovery=False):
         return {"intercomName": "orchestrator"}
+
+    def require_operation_authority(self, root, *, pipeline_id=None, recovery=False):
+        self.authority_calls.append({"pipeline_id": pipeline_id, "recovery": recovery})
+        # Mirror real agency_ctl.require_operation_authority: when no pipeline is
+        # bound, the authority decision is the orchestrator gate.
+        if pipeline_id is None:
+            return self.require_orchestrator(root, recovery=recovery)
+        return {"intercomName": "orchestrator"}
+
+    def require_active_dispatched_stage_spawn(self, root, pipeline_id, role, instance):
+        self.stage_spawn_calls.append(
+            {"pipeline_id": pipeline_id, "role": role, "instance": instance}
+        )
+        return {
+            "id": "stage",
+            "role": role,
+            "status": "dispatched",
+            "assignedInstance": instance,
+        }
 
     def reconcile_cmux(self, root):
         return {"ok": True}
@@ -32,10 +57,15 @@ def spawn_env(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AGENCY_PROJECT_ROOT", str(project))
     (root / "agents.yaml").write_text(
         """agents:
+  pipeline-runner:
+    lifecycleDefault: temporary
   scout:
     lifecycleDefault: temporary
     peers: [orchestrator]
   planner:
+    lifecycleDefault: persistent
+    peers: [orchestrator]
+  worker:
     lifecycleDefault: persistent
     peers: [orchestrator]
 spawn:
@@ -47,6 +77,109 @@ spawn:
     (root / "sessions.json").write_text(json.dumps({"version": 1, "instances": []}) + "\n")
     monkeypatch.setattr(asp, "_ctl", lambda: FakeCtl(root))
     return root
+
+
+def test_pipeline_runner_command_has_fixed_serve_shape(tmp_path: Path):
+    work = tmp_path / "work"
+    root = tmp_path / "agency"
+    project = tmp_path / "project"
+
+    command = asp.build_pipeline_runner_command(
+        work=work,
+        root=root,
+        project=project,
+        instance="runner-01",
+    )
+
+    expected_process = shlex.join(
+        [
+            "env",
+            f"AGENCY_ROOT={root}",
+            f"AGENCY_PROJECT_ROOT={project}",
+            sys.executable,
+            str((asp.scripts_dir() / "agency_ctl.py").resolve()),
+            "pipeline-runner",
+            "serve",
+            "--instance",
+            "runner-01",
+        ]
+    )
+    assert command == f"cd {shlex.quote(str(work))} && {expected_process}"
+    assert "exec" not in shlex.split(command)
+    assert "AGENCY_ROOT=" in command
+    assert "AGENCY_PROJECT_ROOT=" in command
+    assert "pi --approve" not in command
+    assert "boot" not in command.lower()
+    assert "--pipeline" not in command
+    assert "--topic" not in command
+
+
+def test_pipeline_runner_command_quotes_hostile_paths_as_single_arguments(tmp_path: Path):
+    work = tmp_path / "work dir; printf exploited\n'quoted'"
+    root = tmp_path / "agency $(printf exploited)"
+    project = tmp_path / 'project "quoted" && printf exploited'
+
+    command = asp.build_pipeline_runner_command(
+        work=work,
+        root=root,
+        project=project,
+        instance="runner_safe-2",
+    )
+
+    assert shlex.split(command) == [
+        "cd",
+        str(work),
+        "&&",
+        "env",
+        f"AGENCY_ROOT={root}",
+        f"AGENCY_PROJECT_ROOT={project}",
+        sys.executable,
+        str((asp.scripts_dir() / "agency_ctl.py").resolve()),
+        "pipeline-runner",
+        "serve",
+        "--instance",
+        "runner_safe-2",
+    ]
+
+
+@pytest.mark.parametrize(
+    "instance",
+    ["", "-runner", "_runner", "runner name", "runner\nname", "runner;touch", "runner$id", "runner/id"],
+)
+def test_pipeline_runner_command_rejects_malformed_instance(instance: str, tmp_path: Path):
+    with pytest.raises(ValueError, match="instance identifier"):
+        asp.build_pipeline_runner_command(
+            work=tmp_path,
+            root=tmp_path,
+            project=tmp_path,
+            instance=instance,
+        )
+
+
+def test_pipeline_runner_command_accepts_safe_identifier_family(tmp_path: Path):
+    command = asp.build_pipeline_runner_command(
+        work=tmp_path,
+        root=tmp_path,
+        project=tmp_path,
+        instance="7Runner_name-2",
+    )
+    assert shlex.split(command)[-1] == "7Runner_name-2"
+
+
+def test_pipeline_runner_command_signature_has_no_generic_process_inputs():
+    signature = inspect.signature(asp.build_pipeline_runner_command)
+    assert list(signature.parameters) == ["work", "root", "project", "instance"]
+    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in signature.parameters.values())
+    assert not {
+        "command",
+        "pane",
+        "argv",
+        "pipeline_id",
+        "pipeline_name",
+        "topic",
+        "agent",
+        "config",
+    } & signature.parameters.keys()
 
 
 def test_reuse_idle(spawn_env: Path):
@@ -72,6 +205,30 @@ def test_max_panes(spawn_env: Path):
     (spawn_env / "sessions.json").write_text(json.dumps(data) + "\n")
     with pytest.raises(RuntimeError, match="max specialist panes"):
         asp.spawn_specialist("scout", dry_run=True)
+    with pytest.raises(RuntimeError, match="max specialist panes"):
+        asp.spawn_specialist("scout", name="scout-t3", dry_run=True, pipeline_id="p-123")
+
+
+def test_pipeline_authority_still_enforces_worker_sole_writer(spawn_env: Path):
+    data = {
+        "version": 1,
+        "instances": [
+            {"intercomName": "worker", "role": "worker", "status": "idle"},
+        ],
+    }
+    (spawn_env / "sessions.json").write_text(json.dumps(data) + "\n")
+    with pytest.raises(RuntimeError, match="sole writer"):
+        asp.spawn_specialist("worker", name="worker-new", dry_run=True, pipeline_id="p-123")
+
+
+def test_spawn_threads_pipeline_authority_before_policy(spawn_env: Path, monkeypatch):
+    fake = FakeCtl(spawn_env)
+    monkeypatch.setattr(asp, "_ctl", lambda: fake)
+    asp.spawn_specialist("scout", name="scout-t1", dry_run=True, pipeline_id="p-123")
+    assert fake.authority_calls == [{"pipeline_id": "p-123", "recovery": False}]
+    assert fake.stage_spawn_calls == [
+        {"pipeline_id": "p-123", "role": "scout", "instance": "scout-t1"}
+    ]
 
 
 def test_dry_run_creates_idle_row(spawn_env: Path):
@@ -182,7 +339,139 @@ def test_managed_guidance_uses_broker_status_not_prompt_time_exports():
         assert '`export AGENCY_ROOT="<project>/.pi/agency"`' not in on_each, path
 
 
+def test_agent_spawn_cli_exposes_pipeline_id_for_spawn():
+    result = subprocess.run(
+        [sys.executable, str(Path(asp.__file__)), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "--pipeline-id" in result.stdout
+    assert "--pipeline " not in result.stdout
+
+
+def test_pipeline_spawn_requires_name_and_never_substitutes_idle_instance(spawn_env: Path):
+    data = {
+        "version": 1,
+        "instances": [
+            {
+                "intercomName": "scout-t-other",
+                "role": "scout",
+                "status": "idle",
+                "lifecycle": "temporary",
+            }
+        ],
+    }
+    (spawn_env / "sessions.json").write_text(json.dumps(data) + "\n")
+    with pytest.raises(RuntimeError, match="explicit --name"):
+        asp.spawn_specialist("scout", pipeline_id="p-123", reuse=True, dry_run=True)
+    result = asp.spawn_specialist(
+        "scout",
+        name="scout-t-reserved",
+        pipeline_id="p-123",
+        reuse=True,
+        dry_run=True,
+    )
+    assert result["action"] == "spawn-dry-run"
+    assert result["instance"]["intercomName"] == "scout-t-reserved"
+
+
+def test_fixed_pipeline_runner_ignores_malicious_config_and_never_builds_pi(
+    spawn_env: Path, monkeypatch
+):
+    (spawn_env / "agents.yaml").write_text(
+        """agents:
+  pipeline-runner:
+    lifecycleDefault: temporary
+    command: "printf exploited"
+    pane: "evil"
+    runnerCommand: "pi --approve"
+spawn:
+  maxSpecialistPanes: 2
+"""
+    )
+    sent = []
+    monkeypatch.setattr(asp, "open_pane", lambda direction, focus: {"surface": "s1", "pane": "p1"})
+    monkeypatch.setattr(
+        asp,
+        "write_boot_prompt",
+        lambda *args, **kwargs: pytest.fail("fixed runner must not write a boot prompt"),
+    )
+    monkeypatch.setattr(
+        asp,
+        "build_pi_command",
+        lambda **kwargs: pytest.fail("fixed runner must not build a Pi command"),
+    )
+    monkeypatch.setattr(asp, "send_to_surface", lambda surface, command: sent.append((surface, command)))
+
+    result = asp.spawn_specialist("pipeline-runner", name="pipeline-runner-t1", boot_wait=0)
+
+    assert result["action"] == "spawn"
+    assert "processCommand" in result
+    assert "piCommand" not in result and "bootPromptPath" not in result
+    assert sent == [("s1", result["processCommand"])]
+    assert "pipeline-runner serve --instance pipeline-runner-t1" in result["processCommand"]
+    assert "printf exploited" not in result["processCommand"]
+    assert "pi --approve" not in result["processCommand"]
+
+
+def test_ordinary_specialist_spawn_still_uses_pi(spawn_env: Path, monkeypatch):
+    sent = []
+    boot_path = spawn_env / "boot.txt"
+    monkeypatch.setattr(asp, "open_pane", lambda direction, focus: {"surface": "s1", "pane": "p1"})
+    monkeypatch.setattr(asp, "write_boot_prompt", lambda root, instance, boot: boot_path)
+    monkeypatch.setattr(asp, "build_pi_command", lambda **kwargs: "ordinary-pi-command")
+    monkeypatch.setattr(asp, "send_to_surface", lambda surface, command: sent.append((surface, command)))
+
+    result = asp.spawn_specialist("scout", boot_wait=0)
+
+    assert result["action"] == "spawn"
+    assert result["piCommand"] == "ordinary-pi-command"
+    assert sent == [("s1", "ordinary-pi-command")]
+
+
 def test_dual_entry_same_function():
     import specialist_spawn as ss
 
     assert ss.spawn_specialist is asp.spawn_specialist
+
+
+def test_spawn_pipeline_init_creates_run_and_lock(spawn_env, monkeypatch):
+    root = spawn_env
+    (root / "pipelines.yaml").write_text(
+        "pipelines:\n"
+        "  smoke:\n"
+        "    description: smoke\n"
+        "    onFailure: stop\n"
+        "    stages:\n"
+        "      - id: w\n"
+        "        role: worker\n"
+        "        goal: work\n"
+        "        outputs: [primary]\n"
+        "        inputs: []\n"
+    )
+    monkeypatch.setattr(asp, "_ctl", lambda: FakeCtl(root))
+    monkeypatch.setattr(
+        asp, "open_pane", lambda direction, focus=False: {"surface": "surface:runner", "pane": "pane:runner"}
+    )
+    sent = []
+    monkeypatch.setattr(
+        asp, "send_to_surface", lambda surface, command: sent.append((surface, command))
+    )
+
+    result = asp.spawn_specialist("pipeline-runner", pipeline_name="smoke", topic="my topic")
+
+    assert result["action"] == "spawn"
+    assert result["pipelineId"]
+    assert result["finalTaskId"] == f"pipe-done-{result['pipelineId']}"
+    from pipeline_state import get_active_run, read_lock
+
+    run = get_active_run(root)
+    assert run["pipelineName"] == "smoke"
+    assert run["topic"] == "my topic"
+    assert run["status"] == "running"
+    lock = read_lock(root)
+    assert lock["pipelineId"] == result["pipelineId"]
+    assert lock["ownerId"] == result["instance"]["intercomName"]
+    assert sent and sent[0][0] == "surface:runner"

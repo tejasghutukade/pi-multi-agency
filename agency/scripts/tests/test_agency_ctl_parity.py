@@ -18,6 +18,8 @@ def test_public_subcommands_registered():
         "wait",
         "release",
         "claim-orchestrator",
+        "pipeline-report",
+        "pipeline-answer",
         "init",
         "hub-start",
         "lifecycle",

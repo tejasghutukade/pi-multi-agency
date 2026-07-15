@@ -20,6 +20,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from hub_delivery import (  # noqa: E402
     ack_delivery,
     claim_for_delivery,
+    is_state_owned_stage_report,
 )
 from ledger import find_by_surface, find_instance, load_sessions, save_sessions  # noqa: E402
 from specialist_delivery import (  # noqa: E402
@@ -82,6 +83,7 @@ def hub_inbox_envelopes(root: Path, types: set[str] | None = None) -> list[dict[
                 continue
             if env.get("type") in types:
                 out.append({"path": str(p), "stage": sub, "envelope": env})
+    out = [x for x in out if not is_state_owned_stage_report(root, x["envelope"])]
     return out
 
 

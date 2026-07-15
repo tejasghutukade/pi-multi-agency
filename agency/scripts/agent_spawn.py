@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -22,6 +24,7 @@ from catalog import (  # noqa: E402
     HUB,
     agent_file_for,
     load_agents,
+    load_pipelines,
     max_specialist_panes,
     parse_agent_frontmatter,
     role_defaults,
@@ -35,6 +38,7 @@ from ledger import (  # noqa: E402
     save_sessions,
     specialist_count,
 )
+from pipeline_state import acquire_lock, create_run, load_state  # noqa: E402
 from pi_launch import build_pi_command, write_boot_prompt  # noqa: E402
 
 
@@ -44,10 +48,53 @@ def _ctl():
     return ctl
 
 
+def _allocate_pipeline_id(root: Path, pipeline_name: str) -> str:
+    """Allocate a unique, safe pipeline id for an init request."""
+    try:
+        data = load_state(root)
+    except Exception:
+        data = {"runs": []}
+    for _ in range(16):
+        candidate = f"{pipeline_name}-{secrets.token_hex(4)}"
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", candidate):
+            continue
+        if any(run.get("pipelineId") == candidate for run in data.get("runs", [])):
+            continue
+        return candidate
+    raise RuntimeError("could not allocate a unique pipeline id")
+
+
 def utc_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_pipeline_runner_command(
+    *,
+    work: str | os.PathLike[str],
+    root: str | os.PathLike[str],
+    project: str | os.PathLike[str],
+    instance: str,
+) -> str:
+    """Build the fixed pipeline-runner serve command for a future launch seam."""
+    if not isinstance(instance, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", instance):
+        raise ValueError("invalid pipeline-runner instance identifier")
+
+    process = shlex.join(
+        [
+            "env",
+            f"AGENCY_ROOT={os.fspath(root)}",
+            f"AGENCY_PROJECT_ROOT={os.fspath(project)}",
+            sys.executable,
+            str((scripts_dir() / "agency_ctl.py").resolve()),
+            "pipeline-runner",
+            "serve",
+            "--instance",
+            instance,
+        ]
+    )
+    return f"cd {shlex.quote(os.fspath(work))} && {process}"
 
 
 def bootstrap_text(
@@ -96,7 +143,11 @@ def spawn_specialist(
     cwd: str | None = None,
     nudge: bool = False,
     recovery: bool = False,
+    pipeline_id: str | None = None,
     message: str | None = None,
+    pipeline_name: str | None = None,
+    topic: str | None = None,
+    pipeline_init: bool = False,
 ) -> dict[str, Any]:
     """Open (or reuse) a specialist pane and boot pi. Must run inside cmux.
 
@@ -104,7 +155,14 @@ def spawn_specialist(
     """
     ctl = _ctl()
     root = agency_root()
-    ctl.require_orchestrator(root, recovery=recovery)
+    if not pipeline_init:
+        ctl.require_operation_authority(root, pipeline_id=pipeline_id, recovery=recovery)
+    if pipeline_id is not None:
+        if not name:
+            raise RuntimeError("pipeline spawn denied: explicit --name is required")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+            raise RuntimeError("pipeline spawn denied: name must be a safe identifier")
+        ctl.require_active_dispatched_stage_spawn(root, pipeline_id, role, name)
     try:
         ctl.reconcile_cmux(root)
     except Exception:
@@ -119,9 +177,18 @@ def spawn_specialist(
     max_panes = max_specialist_panes(agents)
 
     if reuse:
-        idle = find_idle_role(data, role)
-        if idle:
-            return {"ok": True, "action": "reuse", "instance": idle}
+        if pipeline_id is not None:
+            exact = find_instance(data, name)
+            if exact is not None:
+                if exact.get("role") != role or exact.get("status") != "idle":
+                    raise RuntimeError(
+                        f"reserved instance {name!r} is not an idle {role!r} instance"
+                    )
+                return {"ok": True, "action": "reuse", "instance": exact}
+        else:
+            idle = find_idle_role(data, role)
+            if idle:
+                return {"ok": True, "action": "reuse", "instance": idle}
 
     if specialist_count(data) >= max_panes:
         raise RuntimeError(f"max specialist panes reached ({max_panes})")
@@ -141,7 +208,12 @@ def spawn_specialist(
         if working_rows:
             raise RuntimeError("Worker already working — queue; do not spawn a second Worker")
 
-    resolved_lifecycle = lifecycle or agent.get("lifecycleDefault") or "temporary"
+    if role == "pipeline-runner":
+        if lifecycle not in (None, "temporary"):
+            raise RuntimeError("pipeline-runner lifecycle must be temporary")
+        resolved_lifecycle = "temporary"
+    else:
+        resolved_lifecycle = lifecycle or agent.get("lifecycleDefault") or "temporary"
     if resolved_lifecycle not in ("temporary", "persistent"):
         raise RuntimeError("lifecycle must be temporary|persistent")
 
@@ -166,9 +238,10 @@ def spawn_specialist(
     if find_instance(data, instance_name):
         raise RuntimeError(f"instance name already claimed: {instance_name}")
 
+    fixed_runner = role == "pipeline-runner"
     charter = agent.get("charterPath") or f".pi/agency/charters/{role}.md"
-    skill = agent.get("skillPath")
-    agent_path = agent_file_for(role, agent)
+    skill = None if fixed_runner else agent.get("skillPath")
+    agent_path = None if fixed_runner else agent_file_for(role, agent)
     fm = parse_agent_frontmatter(agent_path) if agent_path else {}
     tools = fm.get("tools")
     spawn_cwd = Path(cwd).resolve() if cwd else project_root()
@@ -221,7 +294,15 @@ def spawn_specialist(
         row["status"] = "idle"
         row["updatedAt"] = utc_now()
         save_sessions(root, data)
-        return {"ok": True, "action": "spawn-dry-run", "instance": row}
+        result = {"ok": True, "action": "spawn-dry-run", "instance": row}
+        if fixed_runner:
+            result["processCommand"] = build_pipeline_runner_command(
+                work=spawn_cwd,
+                root=root,
+                project=project_root(),
+                instance=instance_name,
+            )
+        return result
 
     try:
         opened = open_pane(direction or "right", focus=False)
@@ -237,7 +318,66 @@ def spawn_specialist(
     row["updatedAt"] = utc_now()
     save_sessions(root, data)
 
+    pipeline_id_out = pipeline_id
+    final_task_id: str | None = None
+    if role == "pipeline-runner" and (pipeline_name or topic):
+        if pipeline_id is not None:
+            raise RuntimeError("pipeline init cannot also carry --pipeline-id")
+        if not pipeline_name or not topic:
+            raise RuntimeError("pipeline init requires --pipeline <name> and --topic <text>")
+        loaded = load_pipelines(root)
+        definition = (loaded.get("pipelines") or {}).get(pipeline_name)
+        if not isinstance(definition, Mapping):
+            raise RuntimeError(f"pipeline {pipeline_name!r} is not defined in pipelines.yaml")
+        pipeline_id_out = _allocate_pipeline_id(root, pipeline_name)
+        acquire_lock(
+            root,
+            pipeline_id=pipeline_id_out,
+            owner_id=instance_name,
+            owner_surface=surface,
+        )
+        create_run(
+            root,
+            pipeline_id=pipeline_id_out,
+            pipeline_name=pipeline_name,
+            topic=topic,
+            definition=definition,
+            lock_owner=instance_name,
+            runner_instance=instance_name,
+            runner_surface=surface,
+        )
+        final_task_id = f"pipe-done-{pipeline_id_out}"
+
     work = str(spawn_cwd)
+    if fixed_runner:
+        process_cmd = build_pipeline_runner_command(
+            work=spawn_cwd,
+            root=root,
+            project=project_root(),
+            instance=instance_name,
+        )
+        try:
+            send_to_surface(surface, process_cmd)
+        except RuntimeError as e:
+            row["status"] = "failed"
+            row["updatedAt"] = utc_now()
+            save_sessions(root, data)
+            raise RuntimeError(f"cmux send pipeline runner failed: {e}") from e
+        row["status"] = "idle"
+        row["updatedAt"] = utc_now()
+        save_sessions(root, data)
+        result = {
+            "ok": True,
+            "action": "spawn",
+            "instance": row,
+            "bootWaitSec": boot_wait,
+            "processCommand": process_cmd,
+        }
+        if final_task_id is not None:
+            result["pipelineId"] = pipeline_id_out
+            result["finalTaskId"] = final_task_id
+        return result
+
     boot = (
         message
         if message is not None
@@ -288,6 +428,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--boot-wait", type=float, default=5.0)
     p.add_argument("--cwd", help="Pane working directory (Scout reference-repo mode)")
+    p.add_argument("--pipeline-id", help="Select bound pipeline-runner authority")
     p.add_argument(
         "--message",
         "-m",
@@ -312,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
             cwd=args.cwd,
             nudge=False,
             recovery=args.recovery,
+            pipeline_id=args.pipeline_id,
             message=args.message,
         )
         print(json.dumps(result, indent=2))

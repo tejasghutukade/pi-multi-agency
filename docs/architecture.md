@@ -591,6 +591,19 @@ Phase 1 is complete when all of the following are true:
 
 **Phase 1 exit: COMPLETE (2026-07-12).**
 
+## Declarative Pipelines
+
+A pipeline is a named, declarative spec in a per-project `.pi/agency/pipelines.yaml`
+(per-project, operator-controlled).  Stages advance **deterministically** via the existing
+`spawn → delegate → wait` primitives — no LLM decides the next stage.
+
+- **Start (orchestrator):** `agency_spawn({ role: "pipeline-runner", pipeline: "<name>", topic: "<text>" })` validates the pipeline, allocates a unique id, acquires the per-project lock, creates one precreated `running` run, and launches the waiting `pipeline-runner` process.
+- **Start (root operator):** `agency_ctl run-pipeline --name <name> --topic <text>` (must run from the orchestrator hub surface) performs the same sequence, then sends the authenticated initial `delegate`.
+- **Initial delegate:** `{pipelineId, pipelineName, topic}` with `taskId == finalTaskId`, sent `--require-caller` from the hub.  The runner atomically claims it, binds its session row to the pipeline id, acknowledges, and only then drives stages.
+- **Stage loop:** each stage resolves named inputs to project-contained `contextPaths`, persists `dispatched` before delegate, spawns/reuses under bound authority, delegates, and waits.  Acceptance is exact task/sender/pipeline identity plus a required `{status, summary, artifacts, error?}` contract with path containment.
+- **Hands-off orchestrator:** intermediate stage `report`s are consumed by the bound runner and **filtered from the orchestrator chat**; only the runner's final synthesis `report` and any pipeline `ask` arrive.  The `pl-` task-id prefix is naming only — ownership comes from durable pipeline state.
+- **Authority + safety:** runner authority is bound to a live registered surface + active pipeline id; unauthenticated callers and stale/mismatched runners fail closed.  `pipelines.json` is atomically persisted with a prior-generation fallback; one active run per project; resume reconciles without blindly repeating non-idempotent work.
+
 ## Agent Roles
 
 | Agent | Skill basis | Primary behavior |

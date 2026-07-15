@@ -43,6 +43,7 @@ from cmux_pane import (  # noqa: E402
 )
 from ledger import (  # noqa: E402
     clear_instance,
+    find_by_surface,
     find_idle_role,
     find_instance,
     find_instance_by_task,
@@ -52,10 +53,12 @@ from ledger import (  # noqa: E402
     specialist_count,
 )
 from pi_launch import build_pi_command  # noqa: E402
+import pipeline_state  # noqa: E402
 
 HUB = "orchestrator"
 assert CATALOG_HUB == HUB
 STARTING_TIMEOUT_SEC = 90
+ACTIVE_PIPELINE_RUNNER_STATUSES = frozenset({"idle", "working"})
 # Hub process allowlist: read/search + agency_* — no edit/write/bash (see docs/architecture.md).
 HUB_TOOLS = (
     "read,grep,find,ls,"
@@ -117,7 +120,14 @@ def bus_run(root: Path, args: list[str], timeout: float = 60) -> dict[str, Any]:
 
 def cmd_wait(args: argparse.Namespace) -> int:
     root = agency_root()
-    require_orchestrator(root)
+    pipeline_id = getattr(args, "pipeline_id", None)
+    require_operation_authority(root, pipeline_id=pipeline_id)
+    expected_sender = None
+    if pipeline_id is not None:
+        if args.as_name != HUB:
+            raise RuntimeError("pipeline wait denied: pipeline runner may wait only as orchestrator")
+        ownership = require_active_dispatched_stage(root, pipeline_id, args.task_id)
+        expected_sender = ownership["expectedSender"]
     data = load_sessions(root)
     inst = find_instance_by_task(data, args.task_id)
 
@@ -151,6 +161,8 @@ def cmd_wait(args: argparse.Namespace) -> int:
         "--interval",
         str(args.interval),
     ]
+    if expected_sender is not None:
+        bus_args.extend(["--from", expected_sender])
     if args.auto_done_progress is False:
         bus_args.append("--no-auto-done-progress")
     elif args.auto_done_progress is True:
@@ -204,15 +216,37 @@ def reconcile_cmux(root: Path) -> dict[str, Any]:
 
 
 def ensure_orchestrator(root: Path) -> dict[str, Any]:
+    """Bind or rebind the single persistent orchestrator (HUB) role.
+
+    Role-gating: only the orchestrator surface may mutate the orchestrator row.
+    A non-orchestrator pane (e.g. a rogue specialist) calling an operator command
+    must never rebind or bootstrap the orchestrator. The orchestrator is identified
+    by its session row's role/intercomName == HUB, resolved by the caller surface.
+    """
     data = load_sessions(root)
     instances = list(data.get("instances") or [])
     surface, pane = caller_surface()
-    orch = next((i for i in instances if i.get("role") == HUB or i.get("intercomName") == HUB), None)
-    if orch:
+    orch = next(
+        (i for i in instances if i.get("role") == HUB or i.get("intercomName") == HUB),
+        None,
+    )
+    caller_rows = [r for r in instances if r.get("cmuxSurface") == surface]
+    caller_is_hub = any(
+        (r.get("role") == HUB or r.get("intercomName") == HUB) for r in caller_rows
+    )
+
+    if orch is not None:
+        # The orchestrator already exists. Only its own surface may rebind it.
         if orch.get("cmuxSurface") and orch["cmuxSurface"] != surface:
             raise RuntimeError(
-                f"spawn/release denied: orchestrator is bound to {orch.get('cmuxSurface')}, "
-                f"caller is {surface}"
+                f"spawn/release denied: orchestrator is bound to "
+                f"{orch.get('cmuxSurface')!r}, caller is {surface!r}"
+            )
+        if orch.get("cmuxSurface") is None and not caller_is_hub and caller_rows:
+            # An existing, unbound orchestrator may only be claimed by a HUB surface.
+            raise RuntimeError(
+                f"orchestrator denied: {caller_rows[0].get('intercomName')!r} "
+                f"(not the HUB role) cannot claim the orchestrator"
             )
         orch["cmuxSurface"] = surface
         orch["cmuxPane"] = pane
@@ -221,6 +255,13 @@ def ensure_orchestrator(root: Path) -> dict[str, Any]:
         save_sessions(root, data)
         return orch
 
+    # First claim: no orchestrator row exists yet. Only a HUB caller (or an
+    # unregistered harness surface) may create it; a registered non-HUB pane may not.
+    if caller_rows and not caller_is_hub:
+        raise RuntimeError(
+            f"orchestrator denied: cannot claim orchestrator as "
+            f"{caller_rows[0].get('intercomName')!r} (not the HUB role)"
+        )
     row = {
         "instanceId": f"orchestrator-{secrets.token_hex(4)}",
         "role": HUB,
@@ -249,6 +290,188 @@ def require_orchestrator(root: Path, *, recovery: bool = False) -> dict[str, Any
             None,
         )
     return ensure_orchestrator(root)
+
+
+def process_alive(pid: int) -> bool:
+    """Return whether a positive process ID is alive; fail closed on probe errors."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def require_pipeline_runner_authority(root: Path, pipeline_id: str) -> dict[str, Any]:
+    """Authenticate the caller against session, pipeline binding, and lock state."""
+    if not isinstance(pipeline_id, str) or not pipeline_id:
+        raise RuntimeError("pipeline authority denied: pipeline ID is required")
+
+    surface, _pane = caller_surface()
+    data = load_sessions(root)
+    runner = find_by_surface(data, surface)
+    if runner is None:
+        raise RuntimeError(f"pipeline authority denied: unregistered caller surface {surface!r}")
+    surface_rows = [
+        row for row in (data.get("instances") or []) if row.get("cmuxSurface") == surface
+    ]
+    if len(surface_rows) != 1:
+        raise RuntimeError(
+            f"pipeline authority denied: ambiguous caller surface {surface!r} "
+            f"has {len(surface_rows)} session rows"
+        )
+    if runner.get("role") != "pipeline-runner":
+        raise RuntimeError(
+            "pipeline authority denied: caller role must be pipeline-runner, "
+            f"got {runner.get('role')!r}"
+        )
+    if runner.get("activePipelineId") != pipeline_id:
+        raise RuntimeError(
+            "pipeline authority denied: session pipeline mismatch: "
+            f"expected {pipeline_id!r}, got {runner.get('activePipelineId')!r}"
+        )
+    if runner.get("status") not in ACTIVE_PIPELINE_RUNNER_STATUSES:
+        raise RuntimeError(
+            "pipeline authority denied: inactive runner status "
+            f"{runner.get('status')!r}"
+        )
+
+    runner_name = runner.get("intercomName")
+    if not isinstance(runner_name, str) or not runner_name:
+        raise RuntimeError("pipeline authority denied: runner intercom name is missing")
+
+    binding = pipeline_state.get_active_runner_binding(root)
+    if binding is None:
+        raise RuntimeError("pipeline authority denied: active runner binding is missing")
+    if binding.get("pipelineId") != pipeline_id:
+        raise RuntimeError(
+            "pipeline authority denied: binding pipeline mismatch: "
+            f"expected {pipeline_id!r}, got {binding.get('pipelineId')!r}"
+        )
+    if binding.get("runnerInstance") != runner_name:
+        raise RuntimeError(
+            "pipeline authority denied: binding instance mismatch: "
+            f"expected {runner_name!r}, got {binding.get('runnerInstance')!r}"
+        )
+    if binding.get("runnerSurface") != surface:
+        raise RuntimeError(
+            "pipeline authority denied: binding surface mismatch: "
+            f"expected {surface!r}, got {binding.get('runnerSurface')!r}"
+        )
+
+    lock = pipeline_state.read_lock(root)
+    if lock is None:
+        raise RuntimeError("pipeline authority denied: pipeline lock is missing")
+    if lock.get("pipelineId") != pipeline_id:
+        raise RuntimeError(
+            "pipeline authority denied: lock pipeline mismatch: "
+            f"expected {pipeline_id!r}, got {lock.get('pipelineId')!r}"
+        )
+    if lock.get("ownerId") != runner_name:
+        raise RuntimeError(
+            "pipeline authority denied: lock owner mismatch: "
+            f"expected {runner_name!r}, got {lock.get('ownerId')!r}"
+        )
+    if lock.get("ownerSurface") != surface:
+        raise RuntimeError(
+            "pipeline authority denied: lock surface mismatch: "
+            f"expected {surface!r}, got {lock.get('ownerSurface')!r}"
+        )
+    owner_pid = lock.get("ownerPid")
+    if not process_alive(owner_pid):
+        raise RuntimeError(
+            f"pipeline authority denied: lock owner PID is not confirmed alive: {owner_pid!r}"
+        )
+    if surface_alive(surface) is not True:
+        raise RuntimeError(
+            f"pipeline authority denied: runner surface is not confirmed alive: {surface!r}"
+        )
+    return runner
+
+
+def require_active_dispatched_stage_spawn(
+    root: Path,
+    pipeline_id: str,
+    role: str,
+    instance: str,
+) -> dict[str, Any]:
+    """Require spawn to effect the current stage's exact durable reservation."""
+    run = pipeline_state.get_active_run(root)
+    if run is None or run.get("pipelineId") != pipeline_id:
+        raise RuntimeError(f"pipeline spawn denied: pipeline {pipeline_id!r} is not active")
+    current_stage_id = run.get("currentStageId")
+    stage = next(
+        (item for item in (run.get("stages") or []) if item.get("id") == current_stage_id),
+        None,
+    )
+    if stage is None:
+        raise RuntimeError("pipeline spawn denied: active pipeline has no current stage")
+    if stage.get("status") != "dispatched":
+        raise RuntimeError(
+            "pipeline spawn denied: current stage is not dispatched: "
+            f"{stage.get('status')!r}"
+        )
+    if stage.get("role") != role:
+        raise RuntimeError(
+            "pipeline spawn denied: role does not match current stage: "
+            f"expected {stage.get('role')!r}, got {role!r}"
+        )
+    if stage.get("assignedInstance") != instance:
+        raise RuntimeError(
+            "pipeline spawn denied: name does not match dispatched reservation: "
+            f"expected {stage.get('assignedInstance')!r}, got {instance!r}"
+        )
+    return stage
+
+
+def require_active_dispatched_stage(
+    root: Path,
+    pipeline_id: str,
+    task_id: str,
+    *,
+    expected_sender: str | None = None,
+) -> dict[str, Any]:
+    """Require exact ownership by the current dispatched stage."""
+    ownership = pipeline_state.find_task_ownership(root, task_id, active_only=True)
+    if ownership is None:
+        raise RuntimeError(f"pipeline operation denied: task {task_id!r} is not active pipeline-owned")
+    if ownership.get("pipelineId") != pipeline_id:
+        raise RuntimeError("pipeline operation denied: task pipeline mismatch")
+    if ownership.get("taskKind") != "stage":
+        raise RuntimeError("pipeline operation denied: task is not a stage task")
+    run = pipeline_state.get_active_run(root)
+    if run is None or run.get("pipelineId") != pipeline_id:
+        raise RuntimeError(f"pipeline operation denied: pipeline {pipeline_id!r} is not active")
+    if ownership.get("stageId") != run.get("currentStageId"):
+        raise RuntimeError("pipeline operation denied: task does not belong to the current stage")
+    if ownership.get("stageStatus") != "dispatched":
+        raise RuntimeError("pipeline operation denied: current stage is not dispatched")
+    sender = ownership.get("expectedSender")
+    if not isinstance(sender, str) or not sender:
+        raise RuntimeError("pipeline operation denied: dispatched stage has no expected sender")
+    if expected_sender is not None and sender != expected_sender:
+        raise RuntimeError(
+            "pipeline operation denied: target does not match dispatched stage sender: "
+            f"expected {sender!r}, got {expected_sender!r}"
+        )
+    return ownership
+
+
+def require_operation_authority(
+    root: Path,
+    *,
+    pipeline_id: str | None = None,
+    recovery: bool = False,
+) -> dict[str, Any] | None:
+    """Select authenticated pipeline authority or preserve orchestrator policy."""
+    if pipeline_id is not None:
+        return require_pipeline_runner_authority(root, pipeline_id)
+    return require_orchestrator(root, recovery=recovery)
 
 
 def cmd_list(_args: argparse.Namespace) -> int:
@@ -298,15 +521,86 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         cwd=args.cwd,
         nudge=False,
         recovery=bool(getattr(args, "recovery", False)),
+        pipeline_id=getattr(args, "pipeline_id", None),
         message=getattr(args, "message", None),
+        pipeline_name=getattr(args, "pipeline_name", None),
+        topic=getattr(args, "topic", None),
+        pipeline_init=False,
     )
     print(json.dumps(result, indent=2))
+    return 0
+
+def cmd_run_pipeline(args: argparse.Namespace) -> int:
+    """User entry: create one run, launch the runner, send the initial delegate.
+
+    This is a documented root-operator command (like agency_init); it does not
+    expose a caller-supplied authority bypass flag.  The initial delegate uses
+    --require-caller and must run from the orchestrator hub surface.
+    """
+    from agent_spawn import spawn_specialist
+
+    result = spawn_specialist(
+        "pipeline-runner",
+        name=None,
+        pipeline_name=args.name,
+        topic=args.topic,
+        pipeline_init=True,
+    )
+    instance = result["instance"]["intercomName"]
+    pipeline_id = result["pipelineId"]
+    final_task_id = result["finalTaskId"]
+    bus_run(
+        agency_root(),
+        [
+            "send",
+            "--from",
+            HUB,
+            "--to",
+            instance,
+            "--type",
+            "delegate",
+            "--task-id",
+            final_task_id,
+            "--payload-json",
+            json.dumps(
+                {
+                    "pipelineId": pipeline_id,
+                    "pipelineName": args.name,
+                    "topic": args.topic,
+                }
+            ),
+            "--require-caller",
+        ],
+    )
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "pipelineId": pipeline_id,
+                "instance": instance,
+                "finalTaskId": final_task_id,
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
 def cmd_delegate(args: argparse.Namespace) -> int:
     root = agency_root()
-    require_orchestrator(root, recovery=bool(getattr(args, "recovery", False)))
+    pipeline_id = getattr(args, "pipeline_id", None)
+    authority = require_operation_authority(
+        root,
+        pipeline_id=pipeline_id,
+        recovery=bool(getattr(args, "recovery", False)),
+    )
+    if pipeline_id is not None:
+        require_active_dispatched_stage(
+            root,
+            pipeline_id,
+            args.task_id,
+            expected_sender=args.to,
+        )
     data = load_sessions(root)
     inst = find_instance(data, args.to)
     if not inst:
@@ -366,10 +660,16 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     inst["updatedAt"] = now
     save_sessions(root, data)
 
+    sender_name = HUB
+    if pipeline_id is not None:
+        candidate = None if authority is None else authority.get("intercomName")
+        if not isinstance(candidate, str) or not candidate:
+            raise RuntimeError("pipeline delegate sender identity is missing")
+        sender_name = candidate
     bus_args = [
         "send",
         "--from",
-        HUB,
+        sender_name,
         "--to",
         args.to,
         "--type",
@@ -381,6 +681,8 @@ def cmd_delegate(args: argparse.Namespace) -> int:
     ]
     if args.workflow_id:
         bus_args.extend(["--workflow-id", args.workflow_id])
+    if pipeline_id is not None or inst.get("role") == "pipeline-runner":
+        bus_args.append("--require-caller")
     if getattr(args, "no_bus", False):
         result = {
             "ok": True,
@@ -462,6 +764,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 0
 
     copy_file(kit / "agents.yaml", agency / "agents.yaml")
+    copy_file(kit / "pipelines.yaml", agency / "pipelines.yaml")
     copy_file(kit / "memory-spec.md", agency / "memory-spec.md")
     copy_tree(kit / "charters", agency / "charters")
 
@@ -582,6 +885,86 @@ def cmd_claim_orchestrator(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pipeline_runner_serve(args: argparse.Namespace) -> int:
+    # Keep ordinary ctl startup independent of the concrete runtime dependency.
+    from pipeline_runtime import serve_pipeline_runner
+
+    result = serve_pipeline_runner(
+        args.instance,
+        resume=bool(args.resume),
+        wait_timeout=float(args.wait_timeout),
+    )
+    print(json.dumps({"ok": True, "action": "pipeline-runner-serve", "result": result}, indent=2))
+    return 0
+
+
+def cmd_pipeline_report(args: argparse.Namespace) -> int:
+    # Ordinary reports must be able to probe this route without gaining pipeline
+    # authority or mutating either transport.
+    from pipeline_runtime import prepare_pipeline_report, send_pipeline_report
+
+    payload = json.loads(args.payload_json)
+    root = agency_root()
+    project = project_root()
+    if args.prepare_only:
+        result = prepare_pipeline_report(
+            root,
+            project,
+            from_instance=args.from_instance,
+            task_id=args.task_id,
+            payload=payload,
+        )
+    else:
+        result = send_pipeline_report(
+            root,
+            project,
+            from_instance=args.from_instance,
+            task_id=args.task_id,
+            payload=payload,
+        )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_pipeline_answer(args: argparse.Namespace) -> int:
+    """Operator entry: record a human answer for a needs_attention stage.
+
+    Orchestrator-gated (HUB surface). Persists the answer bound to the exact
+    stage, then optionally resumes the paused runner, which re-dispatches the
+    stage with the answer injected (Design B continuation).
+    """
+    from pipeline_runtime import serve_pipeline_runner
+
+    root = agency_root()
+    require_operation_authority(root)  # orchestrator only
+    if not args.pipeline_id or not args.stage:
+        raise RuntimeError("pipeline-answer requires --pipeline-id and --stage")
+    answer = args.answer or ""
+    stage = pipeline_state.record_operator_response(
+        root,
+        args.pipeline_id,
+        args.stage,
+        answer,
+        lock_owner=None,
+    )
+    out: dict[str, Any] = {
+        "ok": True,
+        "action": "pipeline-answer",
+        "pipelineId": args.pipeline_id,
+        "stageId": args.stage,
+        "operatorResponse": stage["operatorResponse"],
+    }
+    if args.resume:
+        # Resume drives the runner, which re-dispatches the answered stage.
+        active = pipeline_state.get_active_run(root)
+        if active is None or not active.get("runnerInstance"):
+            raise RuntimeError("no bound runner instance to resume")
+        result = serve_pipeline_runner(active["runnerInstance"], resume=True)
+        out["result"] = result
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="agency_ctl", description="Multi-Agency Option C control plane")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -597,6 +980,9 @@ def main() -> int:
     sp.add_argument("--dry-run", action="store_true")
     sp.add_argument("--boot-wait", type=float, default=5.0)
     sp.add_argument("--cwd", help="Pane working directory (Scout reference-repo mode)")
+    sp.add_argument("--pipeline-id", help="Select bound pipeline-runner authority")
+    sp.add_argument("--pipeline-name", help="Pipeline name from pipelines.yaml (pipeline-runner init)")
+    sp.add_argument("--topic", help="Pipeline topic (pipeline-runner init)")
     sp.add_argument(
         "--message",
         "-m",
@@ -609,10 +995,15 @@ def main() -> int:
         help="Skip orchestrator surface gate (lifecycle abandon/respawn)",
     )
 
+    rp = sub.add_parser("run-pipeline", help="Start a named declarative pipeline (root-operator entry)")
+    rp.add_argument("--name", required=True, help="Pipeline name from pipelines.yaml")
+    rp.add_argument("--topic", required=True, help="Pipeline topic")
+
     d = sub.add_parser("delegate", help="Send bus delegate envelope")
     d.add_argument("--to", required=True)
     d.add_argument("--task-id", required=True)
     d.add_argument("--workflow-id")
+    d.add_argument("--pipeline-id", help="Select bound pipeline-runner authority")
     d.add_argument("--goal")
     d.add_argument("--context-paths", help="JSON array of paths")
     d.add_argument("--success-criteria")
@@ -632,6 +1023,7 @@ def main() -> int:
 
     w = sub.add_parser("wait", help="Wait for hub inbox report/ask for a taskId (legacy)")
     w.add_argument("--task-id", required=True)
+    w.add_argument("--pipeline-id", help="Select bound pipeline-runner authority")
     w.add_argument("--timeout", type=float, default=120.0)
     w.add_argument("--interval", type=float, default=2.0)
     w.add_argument("--as", dest="as_name", default=HUB)
@@ -649,6 +1041,31 @@ def main() -> int:
     r.add_argument("--recovery", action="store_true", help="Skip orchestrator surface gate")
 
     sub.add_parser("claim-orchestrator", help="Bind this cmux surface as orchestrator")
+
+    pr = sub.add_parser("pipeline-runner", help="Fixed declarative pipeline runtime")
+    pr_sub = pr.add_subparsers(dest="pipeline_runner_cmd", required=True)
+    prs = pr_sub.add_parser("serve", help="Claim and drive a precreated pipeline run")
+    prs.add_argument("--instance", required=True)
+    prs.add_argument("--resume", action="store_true")
+    prs.add_argument("--wait-timeout", type=float, default=120.0)
+
+    report = sub.add_parser(
+        "pipeline-report",
+        help="Validate and route an authenticated declarative pipeline stage report",
+    )
+    report.add_argument("--from", dest="from_instance", required=True)
+    report.add_argument("--task-id", required=True)
+    report.add_argument("--payload-json", required=True)
+    report.add_argument("--prepare-only", action="store_true")
+
+    ans = sub.add_parser(
+        "pipeline-answer",
+        help="Record a human answer for a needs_attention stage (orchestrator)",
+    )
+    ans.add_argument("--pipeline-id", required=True)
+    ans.add_argument("--stage", required=True)
+    ans.add_argument("--answer", default="")
+    ans.add_argument("--resume", action="store_true", help="Resume the runner after recording the answer")
 
     ini = sub.add_parser("init", help="Scaffold .pi/agency + .pi/agents in a project from this package")
     ini.add_argument("--project", help="Project root (default: cwd)")
@@ -685,6 +1102,8 @@ def main() -> int:
             return cmd_list(args)
         if args.cmd == "spawn":
             return cmd_spawn(args)
+        if args.cmd == "run-pipeline":
+            return cmd_run_pipeline(args)
         if args.cmd == "delegate":
             return cmd_delegate(args)
         if args.cmd == "wait":
@@ -693,6 +1112,14 @@ def main() -> int:
             return cmd_release(args)
         if args.cmd == "claim-orchestrator":
             return cmd_claim_orchestrator(args)
+        if args.cmd == "pipeline-runner":
+            if args.pipeline_runner_cmd != "serve":
+                raise RuntimeError(f"unknown pipeline-runner command {args.pipeline_runner_cmd}")
+            return cmd_pipeline_runner_serve(args)
+        if args.cmd == "pipeline-report":
+            return cmd_pipeline_report(args)
+        if args.cmd == "pipeline-answer":
+            return cmd_pipeline_answer(args)
         if args.cmd == "lifecycle":
             fwd = list(args.lifecycle_args or [])
             if fwd and fwd[0] == "--":
