@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import inspect
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +61,111 @@ spawn:
     (root / "sessions.json").write_text(json.dumps({"version": 1, "instances": []}) + "\n")
     monkeypatch.setattr(asp, "_ctl", lambda: FakeCtl(root))
     return root
+
+
+def test_pipeline_runner_command_has_fixed_serve_shape(tmp_path: Path):
+    work = tmp_path / "work"
+    root = tmp_path / "agency"
+    project = tmp_path / "project"
+
+    command = asp.build_pipeline_runner_command(
+        work=work,
+        root=root,
+        project=project,
+        instance="runner-01",
+    )
+
+    expected_process = shlex.join(
+        [
+            "exec",
+            "env",
+            f"AGENCY_ROOT={root}",
+            f"AGENCY_PROJECT_ROOT={project}",
+            sys.executable,
+            str((asp.scripts_dir() / "agency_ctl.py").resolve()),
+            "pipeline-runner",
+            "serve",
+            "--instance",
+            "runner-01",
+        ]
+    )
+    assert command == f"cd {shlex.quote(str(work))} && {expected_process}"
+    assert "exec" in command
+    assert "AGENCY_ROOT=" in command
+    assert "AGENCY_PROJECT_ROOT=" in command
+    assert "pi --approve" not in command
+    assert "boot" not in command.lower()
+    assert "--pipeline" not in command
+    assert "--topic" not in command
+
+
+def test_pipeline_runner_command_quotes_hostile_paths_as_single_arguments(tmp_path: Path):
+    work = tmp_path / "work dir; printf exploited\n'quoted'"
+    root = tmp_path / "agency $(printf exploited)"
+    project = tmp_path / 'project "quoted" && printf exploited'
+
+    command = asp.build_pipeline_runner_command(
+        work=work,
+        root=root,
+        project=project,
+        instance="runner_safe-2",
+    )
+
+    assert shlex.split(command) == [
+        "cd",
+        str(work),
+        "&&",
+        "exec",
+        "env",
+        f"AGENCY_ROOT={root}",
+        f"AGENCY_PROJECT_ROOT={project}",
+        sys.executable,
+        str((asp.scripts_dir() / "agency_ctl.py").resolve()),
+        "pipeline-runner",
+        "serve",
+        "--instance",
+        "runner_safe-2",
+    ]
+
+
+@pytest.mark.parametrize(
+    "instance",
+    ["", "-runner", "_runner", "runner name", "runner\nname", "runner;touch", "runner$id", "runner/id"],
+)
+def test_pipeline_runner_command_rejects_malformed_instance(instance: str, tmp_path: Path):
+    with pytest.raises(ValueError, match="instance identifier"):
+        asp.build_pipeline_runner_command(
+            work=tmp_path,
+            root=tmp_path,
+            project=tmp_path,
+            instance=instance,
+        )
+
+
+def test_pipeline_runner_command_accepts_safe_identifier_family(tmp_path: Path):
+    command = asp.build_pipeline_runner_command(
+        work=tmp_path,
+        root=tmp_path,
+        project=tmp_path,
+        instance="7Runner_name-2",
+    )
+    assert shlex.split(command)[-1] == "7Runner_name-2"
+
+
+def test_pipeline_runner_command_signature_has_no_generic_process_inputs():
+    signature = inspect.signature(asp.build_pipeline_runner_command)
+    assert list(signature.parameters) == ["work", "root", "project", "instance"]
+    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in signature.parameters.values())
+    assert not {
+        "command",
+        "pane",
+        "argv",
+        "pipeline_id",
+        "pipeline_name",
+        "topic",
+        "agent",
+        "config",
+    } & signature.parameters.keys()
 
 
 def test_reuse_idle(spawn_env: Path):
@@ -226,6 +333,21 @@ def test_agent_spawn_cli_exposes_pipeline_id_for_spawn():
     assert result.returncode == 0
     assert "--pipeline-id" in result.stdout
     assert "--pipeline " not in result.stdout
+
+
+def test_ordinary_specialist_spawn_still_uses_pi(spawn_env: Path, monkeypatch):
+    sent = []
+    boot_path = spawn_env / "boot.txt"
+    monkeypatch.setattr(asp, "open_pane", lambda direction, focus: {"surface": "s1", "pane": "p1"})
+    monkeypatch.setattr(asp, "write_boot_prompt", lambda root, instance, boot: boot_path)
+    monkeypatch.setattr(asp, "build_pi_command", lambda **kwargs: "ordinary-pi-command")
+    monkeypatch.setattr(asp, "send_to_surface", lambda surface, command: sent.append((surface, command)))
+
+    result = asp.spawn_specialist("scout", boot_wait=0)
+
+    assert result["action"] == "spawn"
+    assert result["piCommand"] == "ordinary-pi-command"
+    assert sent == [("s1", "ordinary-pi-command")]
 
 
 def test_dual_entry_same_function():

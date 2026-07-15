@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -48,6 +50,34 @@ def utc_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_pipeline_runner_command(
+    *,
+    work: str | os.PathLike[str],
+    root: str | os.PathLike[str],
+    project: str | os.PathLike[str],
+    instance: str,
+) -> str:
+    """Build the fixed pipeline-runner serve command for a future launch seam."""
+    if not isinstance(instance, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", instance):
+        raise ValueError("invalid pipeline-runner instance identifier")
+
+    process = shlex.join(
+        [
+            "exec",
+            "env",
+            f"AGENCY_ROOT={os.fspath(root)}",
+            f"AGENCY_PROJECT_ROOT={os.fspath(project)}",
+            sys.executable,
+            str((scripts_dir() / "agency_ctl.py").resolve()),
+            "pipeline-runner",
+            "serve",
+            "--instance",
+            instance,
+        ]
+    )
+    return f"cd {shlex.quote(os.fspath(work))} && {process}"
 
 
 def bootstrap_text(
