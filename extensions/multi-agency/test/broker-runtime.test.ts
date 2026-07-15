@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AgencyBrokerRuntime, buildAgencyTransportId } from "../broker-runtime.ts";
+import { AgencyBrokerRuntime, buildAgencyTransportId, connectedStatusText } from "../broker-runtime.ts";
 import { requireBrokerContext, resolveBrokerContext } from "../broker/paths.ts";
 
 test("broker status is a read-only local diagnostic with no broker round trip", () => {
@@ -51,4 +51,20 @@ test("uninitialized runtime remains unavailable with actionable guidance", async
 			/agency-init|AGENCY_PROJECT_ROOT/i,
 		);
 	} finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("connected footer shows connected state and identity", () => {
+	assert.equal(connectedStatusText(null), "agency: connected");
+	assert.equal(
+		connectedStatusText({ instance: { intercomName: "planner-worker-1" } }),
+		"agency: connected · planner-worker-1",
+	);
+	assert.equal(
+		connectedStatusText({ isHub: true, instance: { intercomName: "orchestrator" } }),
+		"agency: connected · orchestrator [hub]",
+	);
+	assert.equal(
+		connectedStatusText({ isTemporary: true, instance: { intercomName: "scout" } }),
+		"agency: connected · scout [temp]",
+	);
 });
